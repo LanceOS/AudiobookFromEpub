@@ -57,6 +57,12 @@
         </div>
 
         <div class="field-group">
+          <label>Detected Device</label>
+          <div id="detectedDevice" class="readonly">{{ detected_device }}</div>
+          <p class="hint">{{ detected_device_note }}</p>
+        </div>
+
+        <div class="field-group">
           <label>Generation Mode</label>
           <div class="radio-row">
             <label><input type="radio" name="mode" value="single" checked /> One large audio file</label>

@@ -18,6 +18,7 @@ import os
 import re
 import secrets
 import shutil
+import subprocess
 import threading
 import time
 import uuid
@@ -387,20 +388,76 @@ def is_lfs_pointer(path: Path) -> bool:
 
 def detect_device(preferred: str = "cpu") -> str:
     pref = (preferred or "cpu").strip().lower()
+
     if pref == "auto":
         try:
             import torch as _torch  # type: ignore[reportMissingImports]
-            return "cuda" if _torch.cuda.is_available() else "cpu"
+
+            has_cuda_build = bool(getattr(_torch.version, "cuda", None))
+            if has_cuda_build and _torch.cuda.is_available():
+                return "cuda"
+            return "cpu"
         except Exception:
             return "cpu"
-    if pref == "cuda":
+
+    if pref.startswith("cuda"):
         try:
             import torch as _torch  # type: ignore[reportMissingImports]
-            if not _torch.cuda.is_available():
+
+            has_cuda_build = bool(getattr(_torch.version, "cuda", None))
+            if not has_cuda_build or not _torch.cuda.is_available():
                 return "cpu"
         except Exception:
             return "cpu"
+
+    if pref != "cpu" and not pref.startswith("cuda"):
+        return "cpu"
+
     return pref
+
+
+def nvidia_gpu_visible() -> bool:
+    try:
+        probe = subprocess.run(
+            ["nvidia-smi", "-L"],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=2,
+        )
+    except Exception:
+        return False
+
+    return probe.returncode == 0 and "GPU " in (probe.stdout or "")
+
+
+def device_resolution_note(requested_device: str, resolved_device: str) -> str:
+    if str(resolved_device).lower().startswith("cuda"):
+        return "CUDA acceleration is enabled."
+
+    gpu_visible = nvidia_gpu_visible()
+    try:
+        import torch as _torch  # type: ignore[reportMissingImports]
+    except Exception:
+        if gpu_visible:
+            return "NVIDIA GPU detected, but PyTorch is unavailable in this environment."
+        return "Using CPU in the current environment."
+
+    if not bool(getattr(_torch.version, "cuda", None)):
+        if gpu_visible:
+            return "NVIDIA GPU detected, but PyTorch in this environment is CPU-only."
+        return "Using CPU because PyTorch was installed without CUDA support."
+
+    if not _torch.cuda.is_available():
+        if gpu_visible:
+            return "NVIDIA GPU detected, but CUDA is not available to PyTorch in this environment."
+        return "CUDA is not available to PyTorch in this environment."
+
+    requested = (requested_device or "auto").strip().lower()
+    if requested in {"auto", "cuda"} or requested.startswith("cuda"):
+        return "Using CPU because CUDA selection could not be activated."
+
+    return "Using CPU in the current environment."
 
 
 def default_requested_device() -> str:
@@ -845,11 +902,16 @@ def run_generation_job(job_id: str) -> None:
 def index() -> str:
     ensure_app_dirs()
     allowed_root, _ = get_allowed_output_root()
+    requested_device = default_requested_device()
+    detected_device = detect_device(requested_device)
+    detected_device_note = device_resolution_note(requested_device, detected_device)
     return render_template(
         "index.html",
         default_output_dir=str(allowed_root or DEFAULT_OUTPUT_DIR),
         csrf_token=get_csrf_token(),
         voices=VOICE_OPTIONS,
+        detected_device=detected_device,
+        detected_device_note=detected_device_note,
     )
 
 

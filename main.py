@@ -583,8 +583,10 @@ def extract_chapters_from_epub(epub_path: Path) -> List[Dict[str, str]]:
     # Lazy-import parsing libraries so the app can run in environments
     # without ebooklib when in test mode.
     try:
+        import warnings as _warnings
         import ebooklib as _ebooklib  # type: ignore[reportMissingImports]
         from bs4 import BeautifulSoup as _BeautifulSoup  # type: ignore[reportMissingImports]
+        from bs4 import XMLParsedAsHTMLWarning as _XMLParsedAsHTMLWarning  # type: ignore[reportMissingImports]
         from ebooklib import epub as _epub  # type: ignore[reportMissingImports]
     except Exception:
         if is_test_mode():
@@ -609,9 +611,18 @@ def extract_chapters_from_epub(epub_path: Path) -> List[Dict[str, str]]:
         if not content:
             continue
 
-        soup = _BeautifulSoup(content, "lxml")
+        # EPUB chapter documents are typically XHTML/XML, so prefer XML parser.
+        soup = _BeautifulSoup(content, "xml")
         text = soup.get_text(separator=" ", strip=True)
         text = re.sub(r"\s+", " ", text).strip()
+        if len(text) < 20:
+            # Fallback for malformed chapter markup while silencing XML-as-HTML warnings.
+            with _warnings.catch_warnings():
+                _warnings.simplefilter("ignore", _XMLParsedAsHTMLWarning)
+                soup = _BeautifulSoup(content, "lxml")
+            text = soup.get_text(separator=" ", strip=True)
+            text = re.sub(r"\s+", " ", text).strip()
+
         if len(text) < 20:
             continue
 

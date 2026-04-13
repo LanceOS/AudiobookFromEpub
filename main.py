@@ -673,7 +673,7 @@ def extract_book_title(epub_path: Path) -> str:
     return epub_path.stem
 
 
-def extract_chapters_from_epub(epub_path: Path) -> List[Dict[str, str]]:
+def extract_chapters_from_epub(epub_path: Path, skip_front_matter: bool = True) -> List[Dict[str, str]]:
     # Lazy-import parsing libraries so the app can run in environments
     # without ebooklib when in test mode.
     try:
@@ -725,6 +725,37 @@ def extract_chapters_from_epub(epub_path: Path) -> List[Dict[str, str]]:
             chapter_title = heading.get_text(strip=True)
         else:
             chapter_title = f"Chapter {len(chapters) + 1}"
+
+        # Heuristics: optionally skip common front/back matter (preface, TOC, notes).
+        if skip_front_matter:
+            nm_title = (chapter_title or "").lower()
+            nm_text = text.lower()
+
+            front_re = re.compile(
+                r'\b(preface|foreword|introduction|acknowledg|table of contents|contents|toc|dedication|colophon|errata|bibliograph|appendix|references|about the author|publisher|bibliography|note|notes|endnotes|index)\b',
+                re.IGNORECASE,
+            )
+
+            # Skip obvious front-matter titles ("Preface", "Acknowledgements", etc.)
+            if front_re.search(nm_title):
+                continue
+
+            # Detect explicit nav-based table-of-contents
+            nav = soup.find("nav")
+            if nav:
+                nav_text = nav.get_text(separator=" ", strip=True).lower()
+                li_count = len(nav.find_all("li"))
+                if "table of contents" in nav_text or "contents" in nav_text or li_count > 4:
+                    continue
+
+            # Skip short pages that look like TOC or publisher notes
+            head_chunk = nm_text[:400]
+            if ("table of contents" in head_chunk or head_chunk.strip().startswith("contents")) and len(text.split()) < 400:
+                continue
+
+            # Skip short pages that explicitly begin with "notes" or "endnotes"
+            if head_chunk.strip().startswith("notes") or head_chunk.strip().startswith("endnotes"):
+                continue
 
         chapters.append({
             "index": str(len(chapters) + 1),
@@ -948,7 +979,13 @@ def api_upload():
 
     try:
         detected_title = extract_book_title(upload_path)
-        chapters = extract_chapters_from_epub(upload_path)
+        # Allow clients to request skipping front/back matter and notes.
+        # Default behavior is to skip these sections for cleaner audiobooks.
+        skip_front = True
+        raw_skip = request.form.get("skip_front_matter")
+        if raw_skip is not None:
+            skip_front = str(raw_skip).lower() in ("1", "true", "yes", "on")
+        chapters = extract_chapters_from_epub(upload_path, skip_front_matter=skip_front)
     except Exception as exc:
         if is_test_mode():
             # In test mode, tolerate invalid EPUB bytes and provide a simple fallback

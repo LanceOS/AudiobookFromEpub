@@ -231,6 +231,11 @@ async function uploadEpubFile(file) {
   const formData = new FormData();
   formData.append("epub", file);
 
+  // Include user preference for skipping front/back matter and notes
+  const skipEl = byId("skipFrontMatter");
+  const skipVal = skipEl ? (skipEl.checked ? "1" : "0") : "1";
+  formData.append("skip_front_matter", skipVal);
+
   const csrfToken = getCsrfToken();
   if (!csrfToken) {
     throw new Error("Missing CSRF token. Refresh the page and try again.");

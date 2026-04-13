@@ -20,9 +20,14 @@
         <h2>Input</h2>
 
         <div class="field-group">
-          <label for="epubFile">EPUB File</label>
-          <input id="epubFile" type="file" accept=".epub" />
-          <p class="hint">After upload, the book title is detected automatically.</p>
+          <label>EPUB File</label>
+          <div id="dropZone" class="drop-zone">
+            <p>Drop EPUB here</p>
+            <p class="drop-sub">or</p>
+            <button id="browseButton" type="button" class="secondary">Choose EPUB</button>
+            <input id="epubFile" type="file" accept=".epub" hidden />
+          </div>
+          <p class="hint">After upload, the title below updates automatically.</p>
         </div>
 
         <div class="field-group">
@@ -31,7 +36,7 @@
         </div>
 
         <div class="field-group">
-          <label for="outputName">Audio File Name</label>
+          <label for="outputName">Current Audio Title / File Name</label>
           <input id="outputName" type="text" value="audiobook" />
           <p class="hint">You can rename before generating.</p>
         </div>

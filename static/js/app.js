@@ -58,6 +58,10 @@ function renderFiles(files) {
     const links = document.createElement("div");
     links.className = "file-links";
 
+    const path = document.createElement("div");
+    path.className = "file-item-meta";
+    path.textContent = entry.path || "";
+
     const play = document.createElement("a");
     play.href = entry.url;
     play.textContent = "Play";
@@ -71,6 +75,7 @@ function renderFiles(files) {
     links.appendChild(download);
 
     item.appendChild(top);
+    item.appendChild(path);
     item.appendChild(links);
 
     list.appendChild(item);
@@ -155,6 +160,24 @@ async function uploadEpubFile(file) {
   return payload;
 }
 
+async function handleEpubSelection(file) {
+  if (!file) return;
+  if (!file.name.toLowerCase().endsWith(".epub")) {
+    setBadge("failed");
+    byId("statusMessage").textContent = "Please provide a .epub file.";
+    return;
+  }
+
+  byId("statusMessage").textContent = "Uploading EPUB...";
+  try {
+    await uploadEpubFile(file);
+  } catch (error) {
+    byId("statusMessage").textContent = error.message;
+    setBadge("failed");
+    byId("generateButton").disabled = true;
+  }
+}
+
 async function generateAudio() {
   if (!state.jobId) {
     throw new Error("Please upload an EPUB first.");
@@ -185,21 +208,34 @@ async function generateAudio() {
 }
 
 function bindEvents() {
+  const dropZone = byId("dropZone");
+  const browseButton = byId("browseButton");
   const fileInput = byId("epubFile");
   const generateButton = byId("generateButton");
 
+  browseButton.addEventListener("click", () => {
+    fileInput.click();
+  });
+
+  dropZone.addEventListener("dragover", (event) => {
+    event.preventDefault();
+    dropZone.classList.add("drag-over");
+  });
+
+  dropZone.addEventListener("dragleave", () => {
+    dropZone.classList.remove("drag-over");
+  });
+
+  dropZone.addEventListener("drop", async (event) => {
+    event.preventDefault();
+    dropZone.classList.remove("drag-over");
+    const file = event.dataTransfer && event.dataTransfer.files && event.dataTransfer.files[0];
+    await handleEpubSelection(file);
+  });
+
   fileInput.addEventListener("change", async (event) => {
     const file = event.target.files && event.target.files[0];
-    if (!file) return;
-
-    try {
-      byId("statusMessage").textContent = "Uploading EPUB...";
-      await uploadEpubFile(file);
-    } catch (error) {
-      byId("statusMessage").textContent = error.message;
-      setBadge("failed");
-      generateButton.disabled = true;
-    }
+    await handleEpubSelection(file);
   });
 
   generateButton.addEventListener("click", async () => {

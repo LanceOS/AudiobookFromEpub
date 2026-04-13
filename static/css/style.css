@@ -114,6 +114,43 @@ select {
   background: #fffdf9;
 }
 
+.drop-zone {
+  border: 2px dashed #8fa09d;
+  border-radius: 11px;
+  background: #f3f8f7;
+  padding: 0.9rem;
+  text-align: center;
+  transition: all 160ms ease;
+}
+
+.drop-zone.drag-over {
+  border-color: var(--accent);
+  background: #e4f3ef;
+  transform: translateY(-1px);
+}
+
+.drop-zone p {
+  margin: 0;
+  font-weight: 700;
+}
+
+.drop-sub {
+  margin-top: 0.18rem;
+  margin-bottom: 0.35rem;
+  color: var(--muted);
+  font-weight: 400;
+}
+
+.secondary {
+  border: 1px solid #8ea49f;
+  border-radius: 8px;
+  background: #ffffff;
+  color: #1e5a52;
+  padding: 0.45rem 0.75rem;
+  font-weight: 700;
+  cursor: pointer;
+}
+
 input[type="text"]:focus,
 input[type="file"]:focus,
 select:focus {

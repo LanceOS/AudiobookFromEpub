@@ -361,6 +361,7 @@ def list_generated_files(job: Dict) -> List[Dict]:
         files.append(
             {
                 "name": wav_path.name,
+                "path": str(wav_path),
                 "size_bytes": stat.st_size,
                 "modified_at": datetime.fromtimestamp(stat.st_mtime).isoformat(timespec="seconds"),
                 "url": f"/api/jobs/{job['id']}/file/{wav_path.name}",

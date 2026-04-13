@@ -1,0 +1,70 @@
+# AudiobookFromEpub
+
+Localhost web app that converts an EPUB into audiobook WAV output using Kokoro TTS.
+
+## Features
+
+- Local web UI served by `main.py`.
+- EPUB drag-and-drop upload.
+- Auto-detects title and lets you rename output filename.
+- Choose output directory (validated server-side).
+- Generate either:
+  - one large audio file, or
+  - one audio file per chapter.
+- Every generation creates a new run folder inside your chosen output directory.
+- Output panel lists generated audio files with play/download links.
+
+## Environment
+
+Kokoro releases that this project targets require Python `<3.13`.
+
+Recommended env in this repo:
+
+```bash
+source kokoro_venv/bin/activate
+pip install -r requirements.txt
+pip install flask
+```
+
+If you use `.venv` (Python 3.14), the web app still runs but Kokoro synthesis can fail due package/version incompatibility.
+
+## Run
+
+```bash
+source kokoro_venv/bin/activate
+python main.py
+```
+
+Open:
+
+- `http://127.0.0.1:5000`
+
+## UI Workflow
+
+1. Drop or choose an EPUB file.
+2. Confirm detected title and optionally edit filename.
+3. Set output directory.
+4. Choose generation mode:
+   - single file
+   - per chapter
+5. Click **Generate Audio**.
+6. Watch status and view generated files in the output panel.
+
+## Smoke Test
+
+This validates upload, generation job creation, per-run output folder creation, status/files endpoints.
+
+```bash
+source .venv/bin/activate
+python smoke_test.py
+```
+
+Note: `final_status` may be `failed` in `.venv` due Kokoro dependency limits on Python 3.14. The smoke test is focused on API workflow.
+
+## Output Structure
+
+When generation starts, a new folder is created inside your selected output directory:
+
+- `<chosen_output_dir>/<output_name>_<timestamp>/`
+
+Generated WAV files are placed in that run folder.

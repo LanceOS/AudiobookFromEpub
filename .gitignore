@@ -11,3 +11,6 @@ env.bak/
 venv.bak/
 .venv/
 kokoro_venv/
+.app_data/
+generated_audio/
+*.log

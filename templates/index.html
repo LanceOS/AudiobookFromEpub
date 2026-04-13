@@ -1,0 +1,85 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>EPUB to Audiobook</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}" />
+  </head>
+  <body>
+    <div class="glow glow-a"></div>
+    <div class="glow glow-b"></div>
+
+    <main class="app-shell">
+      <header class="hero">
+        <h1>EPUB to Audiobook</h1>
+        <p>Upload an EPUB, set output options, and generate audio on localhost.</p>
+      </header>
+
+      <section class="panel panel-input">
+        <h2>Input</h2>
+
+        <div class="field-group">
+          <label for="epubFile">EPUB File</label>
+          <input id="epubFile" type="file" accept=".epub" />
+          <p class="hint">After upload, the book title is detected automatically.</p>
+        </div>
+
+        <div class="field-group">
+          <label>Detected Title</label>
+          <div id="detectedTitle" class="readonly">No file uploaded yet.</div>
+        </div>
+
+        <div class="field-group">
+          <label for="outputName">Audio File Name</label>
+          <input id="outputName" type="text" value="audiobook" />
+          <p class="hint">You can rename before generating.</p>
+        </div>
+
+        <div class="field-group">
+          <label for="outputDir">Output Directory</label>
+          <input id="outputDir" type="text" value="{{ default_output_dir }}" />
+        </div>
+
+        <div class="field-group">
+          <label for="voiceSelect">Voice</label>
+          <select id="voiceSelect">
+            {% for voice in voices %}
+            <option value="{{ voice }}">{{ voice }}</option>
+            {% endfor %}
+          </select>
+        </div>
+
+        <div class="field-group">
+          <label>Generation Mode</label>
+          <div class="radio-row">
+            <label><input type="radio" name="mode" value="single" checked /> One large audio file</label>
+            <label><input type="radio" name="mode" value="chapter" /> One audio file per chapter</label>
+          </div>
+        </div>
+
+        <button id="generateButton" class="primary" disabled>Generate Audio</button>
+      </section>
+
+      <section class="panel panel-progress">
+        <h2>Job Status</h2>
+        <div class="status-row">
+          <span>Status:</span>
+          <span id="statusBadge" class="badge idle">idle</span>
+        </div>
+        <progress id="progressBar" value="0" max="100"></progress>
+        <p id="statusMessage">Upload an EPUB to begin.</p>
+        <div id="jobDetails" class="details"></div>
+      </section>
+
+      <section class="panel panel-output">
+        <h2>Generated Audio Files</h2>
+        <ul id="fileList" class="file-list">
+          <li class="empty">No generated files yet.</li>
+        </ul>
+      </section>
+    </main>
+
+    <script src="{{ url_for('static', filename='js/app.js') }}" defer></script>
+  </body>
+</html>

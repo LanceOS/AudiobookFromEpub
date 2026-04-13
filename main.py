@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 import os
 import re
 import shutil
@@ -22,10 +23,25 @@ from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 import ebooklib
+import numpy as np
+import soundfile as sf
+import torch
 from bs4 import BeautifulSoup
 from ebooklib import epub
-from flask import Flask, jsonify, render_template, request, send_from_directory
-from werkzeug.utils import secure_filename
+from flask import Flask, jsonify, render_template, request, send_from_directory  # type: ignore[reportMissingImports]
+from werkzeug.utils import secure_filename  # type: ignore[reportMissingImports]
+
+try:
+    from kokoro import KPipeline  # type: ignore[reportMissingImports]
+    from kokoro.model import KModel  # type: ignore[reportMissingImports]
+
+    HAS_KOKORO = True
+    KOKORO_IMPORT_ERROR = ""
+except Exception as exc:
+    KPipeline = None
+    KModel = None
+    HAS_KOKORO = False
+    KOKORO_IMPORT_ERROR = str(exc)
 
 BASE_DIR = Path(__file__).resolve().parent
 APP_DATA_DIR = BASE_DIR / ".app_data"
@@ -51,6 +67,8 @@ VOICE_OPTIONS = [
 
 JOBS: Dict[str, Dict] = {}
 JOBS_LOCK = threading.Lock()
+PIPELINE_CACHE: Dict[str, Dict] = {}
+PIPELINE_LOCK = threading.Lock()
 
 app = Flask(__name__, template_folder="templates", static_folder="static")
 app.config["MAX_CONTENT_LENGTH"] = 200 * 1024 * 1024
@@ -100,6 +118,155 @@ def create_run_folder(output_dir: Path, base_name: str) -> Path:
         suffix += 1
     run_dir.mkdir(parents=True, exist_ok=False)
     return run_dir
+
+
+def is_lfs_pointer(path: Path) -> bool:
+    if not path.exists():
+        return False
+
+    try:
+        head = path.read_text(encoding="utf-8", errors="ignore")[:256]
+    except Exception:
+        return False
+
+    return "git-lfs.github.com/spec/v1" in head
+
+
+def detect_device(preferred: str = "cpu") -> str:
+    pref = (preferred or "cpu").strip().lower()
+    if pref == "auto":
+        return "cuda" if torch.cuda.is_available() else "cpu"
+    if pref == "cuda" and not torch.cuda.is_available():
+        return "cpu"
+    return pref
+
+
+def split_text_into_chunks(text: str, max_chars: int = 700) -> List[str]:
+    normalized = re.sub(r"\s+", " ", (text or "").strip())
+    if not normalized:
+        return []
+
+    chunks: List[str] = []
+    current = ""
+
+    for sentence in re.split(r"(?<=[.!?])\s+", normalized):
+        sentence = sentence.strip()
+        if not sentence:
+            continue
+
+        if len(sentence) > max_chars:
+            parts = [sentence[i : i + max_chars] for i in range(0, len(sentence), max_chars)]
+        else:
+            parts = [sentence]
+
+        for part in parts:
+            if not current:
+                current = part
+                continue
+
+            candidate = f"{current} {part}"
+            if len(candidate) <= max_chars:
+                current = candidate
+            else:
+                chunks.append(current)
+                current = part
+
+    if current:
+        chunks.append(current)
+
+    return chunks
+
+
+def voice_to_lang_code(voice: str) -> str:
+    if "_" not in voice:
+        return "a"
+    return voice.split("_", 1)[0][0]
+
+
+def choose_voice_reference(voice: str) -> str:
+    local_voice = BASE_DIR / "Kokoro-82M" / "voices" / f"{voice}.pt"
+    if local_voice.exists() and not is_lfs_pointer(local_voice):
+        return str(local_voice)
+    return voice
+
+
+def get_pipeline_bundle(voice: str, device: str) -> Dict:
+    if not HAS_KOKORO:
+        raise RuntimeError(f"kokoro import failed: {KOKORO_IMPORT_ERROR}")
+
+    lang_code = voice_to_lang_code(voice)
+    cache_key = f"{lang_code}:{device}"
+
+    with PIPELINE_LOCK:
+        cached = PIPELINE_CACHE.get(cache_key)
+        if cached:
+            return cached
+
+    model_instance = None
+    checkpoint = BASE_DIR / "Kokoro-82M" / "kokoro-v1_0.pth"
+    config_file = BASE_DIR / "Kokoro-82M" / "config.json"
+
+    if KModel and checkpoint.exists() and not is_lfs_pointer(checkpoint):
+        config_arg = None
+        if config_file.exists() and not is_lfs_pointer(config_file):
+            config_arg = str(config_file)
+        model_instance = KModel(config=config_arg, model=str(checkpoint)).to(device).eval()
+
+    if model_instance is not None:
+        pipeline = KPipeline(lang_code=lang_code, model=model_instance)
+    else:
+        try:
+            pipeline = KPipeline(lang_code=lang_code, device=device)
+        except TypeError:
+            pipeline = KPipeline(lang_code=lang_code)
+
+    bundle = {
+        "pipeline": pipeline,
+        "model": model_instance,
+    }
+
+    with PIPELINE_LOCK:
+        PIPELINE_CACHE[cache_key] = bundle
+
+    return bundle
+
+
+def synthesize_text_to_wav(text: str, voice: str, output_path: Path, device: str = "cpu") -> None:
+    chunks = split_text_into_chunks(text)
+    if not chunks:
+        raise ValueError("No text chunks available for synthesis.")
+
+    bundle = get_pipeline_bundle(voice, device)
+    pipeline = bundle["pipeline"]
+    model = bundle["model"]
+    voice_reference = choose_voice_reference(voice)
+
+    generated_audio: List[np.ndarray] = []
+    for chunk in chunks:
+        if model is not None:
+            generator = pipeline(chunk, voice=voice_reference, model=model)
+        else:
+            generator = pipeline(chunk, voice=voice_reference)
+
+        for result in generator:
+            if hasattr(result, "audio"):
+                audio = result.audio
+            else:
+                audio = result[2]
+
+            if audio is None:
+                continue
+
+            audio_np = np.asarray(audio, dtype=np.float32).flatten()
+            if audio_np.size:
+                generated_audio.append(audio_np)
+
+    if not generated_audio:
+        raise RuntimeError("Kokoro did not return any audio frames.")
+
+    combined = np.concatenate(generated_audio)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    sf.write(str(output_path), combined, 24000)
 
 
 def extract_book_title(epub_path: Path) -> str:
@@ -214,21 +381,50 @@ def run_generation_job(job_id: str) -> None:
 
         output_dir = Path(job["config"]["output_dir"])
         run_folder = create_run_folder(output_dir, job["config"]["output_name"])
-        update_job(job_id, run_folder=str(run_folder), progress=20, message="Run folder created.")
+        update_job(job_id, run_folder=str(run_folder), progress=15, message="Run folder created.")
 
-        # Placeholder in checkpoint 1. Full Kokoro synthesis is added in checkpoint 2.
-        placeholder_file = run_folder / f"{slugify(job['config']['output_name'])}_pending.wav"
-        placeholder_file.write_bytes(b"")
+        upload_path = Path(job["upload_path"])
+        voice = str(job["config"].get("voice", "af_heart"))
+        mode = str(job["config"].get("mode", "single"))
+        output_name = slugify(str(job["config"].get("output_name", "audiobook")), fallback="audiobook")
+        device = detect_device(str(job["config"].get("device", "cpu")))
+
+        chapters = extract_chapters_from_epub(upload_path)
+        total_chapters = len(chapters)
+        update_job(job_id, progress=25, message=f"Loaded {total_chapters} chapters from EPUB.")
+
+        generated_files: List[str] = []
+
+        if mode == "single":
+            combined_text = "\n\n".join(ch["text"] for ch in chapters)
+            out_path = run_folder / f"{output_name}.wav"
+            update_job(job_id, progress=45, message="Generating single audiobook file...")
+            synthesize_text_to_wav(combined_text, voice=voice, output_path=out_path, device=device)
+            generated_files.append(out_path.name)
+            update_job(job_id, progress=95, message="Single file generation complete.")
+        else:
+            for idx, chapter in enumerate(chapters, start=1):
+                chapter_slug = slugify(chapter["title"], fallback=f"chapter_{idx:03d}")
+                out_path = run_folder / f"{idx:03d}_{chapter_slug}.wav"
+                progress_start = int(30 + (idx - 1) / total_chapters * 60)
+                update_job(
+                    job_id,
+                    progress=progress_start,
+                    message=f"Generating chapter {idx}/{total_chapters}: {chapter['title']}",
+                )
+                synthesize_text_to_wav(chapter["text"], voice=voice, output_path=out_path, device=device)
+                generated_files.append(out_path.name)
 
         update_job(
             job_id,
-            status="failed",
+            status="completed",
             progress=100,
-            message="Generation pipeline not implemented yet. Next commit adds Kokoro synthesis.",
-            generated_files=[str(placeholder_file)],
-            error="Generation pipeline not implemented yet.",
+            message=f"Generation complete. Created {len(generated_files)} file(s).",
+            generated_files=generated_files,
+            error=None,
         )
     except Exception as exc:
+        logging.exception("Generation job failed: %s", exc)
         update_job(job_id, status="failed", progress=100, message="Generation failed.", error=str(exc))
 
 

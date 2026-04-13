@@ -35,8 +35,8 @@ try:
     from werkzeug.utils import secure_filename  # type: ignore[reportMissingImports]
 except Exception as exc:  # pragma: no cover - helpful user-facing error
     sys.stderr.write("Missing required Python package 'flask' or 'werkzeug'.\n")
-    sys.stderr.write("Fix: either activate the project venv or install requirements:\n")
-    sys.stderr.write("  source .venv/bin/activate\n")
+    sys.stderr.write("Fix: activate kokoro_venv and install requirements:\n")
+    sys.stderr.write("  source kokoro_venv/bin/activate\n")
     sys.stderr.write("  pip install -r requirements.txt\n")
     sys.stderr.write("Or install Flask directly: pip install flask\n")
     sys.stderr.write("Then re-run: python main.py\n")

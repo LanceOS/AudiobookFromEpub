@@ -5,7 +5,7 @@ PORT=5070
 BASE_URL="http://127.0.0.1:${PORT}"
 
 # Start the Flask server in test mode
-PYTHON_CMD="/home/lance/Documents/Code/AudiobookFromEpub/.venv/bin/python"
+PYTHON_CMD="/home/lance/Documents/Code/AudiobookFromEpub/kokoro_venv/bin/python"
 if [ ! -x "$PYTHON_CMD" ]; then
   PYTHON_CMD=python
 fi

@@ -31,7 +31,7 @@ pip install -r requirements.txt
 pip install kokoro>=0.9.2
 ```
 
-If you use `.venv` (Python 3.14), the web app UI and API will run, but Kokoro synthesis may fail due to package/version incompatibility. Use the `kokoro_venv` shown above for full TTS support.
+Use `kokoro_venv` for both app runtime and TTS generation.
 
 ## Run
 
@@ -60,7 +60,7 @@ Open:
 This validates upload, generation job creation, per-run output folder creation, status/files endpoints.
 
 ```bash
-source .venv/bin/activate
+source kokoro_venv/bin/activate
 python smoke_test.py
 ```
 

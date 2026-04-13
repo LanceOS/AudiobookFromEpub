@@ -89,7 +89,7 @@ def inspect_checkpoint(path, map_location='cpu'):
         print('Checkpoint content (non-dict):', str(ckpt)[:200])
 
 
-def synthesize_with_kokoro(text, voice='af_heart', out='output.wav', lang_code=None):
+def synthesize_with_kokoro(text, voice='af_heart', out='output.wav', lang_code=None, checkpoint=None, config_path=None, device='cpu'):
     if not _HAS_KOKORO:
         raise RuntimeError('kokoro package not available: ' + str(_KOKORO_IMPORT_ERR))
     if lang_code is None:
@@ -97,13 +97,40 @@ def synthesize_with_kokoro(text, voice='af_heart', out='output.wav', lang_code=N
             lang_code = voice.split('_')[0][0]
         else:
             lang_code = 'a'
-    # construct pipeline (KPipeline may accept lang_code kw)
+
+    # prefer local voice file if present
+    voice_arg = voice
+    local_voice = Path('Kokoro-82M') / 'voices' / f"{voice}.pt"
+    if local_voice.exists():
+        voice_arg = str(local_voice)
+
+    # If a local checkpoint/config are provided, construct a KModel from them
+    model_instance = None
     try:
-        pipeline = KPipeline(lang_code=lang_code)
+        from kokoro.model import KModel
+    except Exception:
+        KModel = None
+
+    if checkpoint and KModel:
+        chk = Path(checkpoint)
+        if chk.exists():
+            cfg = config_path or (Path('Kokoro-82M') / 'config.json')
+            if not Path(cfg).exists():
+                cfg = None
+            model_instance = KModel(config=str(cfg) if cfg else None, model=str(chk))
+            model_instance = model_instance.to(device).eval()
+
+    # construct pipeline, injecting model_instance when available to avoid HF downloads
+    try:
+        if model_instance is not None:
+            pipeline = KPipeline(lang_code=lang_code, model=model_instance)
+        else:
+            pipeline = KPipeline(lang_code=lang_code)
     except TypeError:
-        pipeline = KPipeline()
-    print('Generating audio with Kokoro pipeline...')
-    generator = pipeline(text, voice=voice)
+        pipeline = KPipeline(lang_code=lang_code)
+
+    print('Generating audio with Kokoro pipeline... (this may download weights if not using local checkpoint)')
+    generator = pipeline(text, voice=voice_arg, model=model_instance)
     for i, (gs, ps, audio) in enumerate(generator):
         outp = Path(out)
         outp.parent.mkdir(parents=True, exist_ok=True)
@@ -136,7 +163,21 @@ def main():
 
     if _HAS_KOKORO:
         try:
-            synthesize_with_kokoro(text, voice=args.voice, out=args.out)
+            # Only pass a local checkpoint if it exists and is not a Git LFS pointer
+            ckpt_path = None
+            if args.checkpoint:
+                p = Path(args.checkpoint)
+                if p.exists():
+                    try:
+                        head = p.read_text(errors='ignore')[:512]
+                        if 'git-lfs' not in head:
+                            ckpt_path = str(p)
+                        else:
+                            print('Detected Git LFS pointer for checkpoint; will download remote weights instead.')
+                    except Exception:
+                        ckpt_path = None
+
+            synthesize_with_kokoro(text, voice=args.voice, out=args.out, checkpoint=ckpt_path, device=device)
             return
         except Exception as e:
             print('kokoro synthesis failed:', e)

@@ -5,7 +5,13 @@ PORT=5070
 BASE_URL="http://127.0.0.1:${PORT}"
 
 # Start the Flask server in test mode
-AUDIOBOOK_TEST_MODE=1 python main.py --host 127.0.0.1 --port ${PORT} &
+PYTHON_CMD="/home/lance/Documents/Code/AudiobookFromEpub/.venv/bin/python"
+if [ ! -x "$PYTHON_CMD" ]; then
+  PYTHON_CMD=python
+fi
+
+export AUDIOBOOK_TEST_MODE=1
+$PYTHON_CMD main.py --host 127.0.0.1 --port ${PORT} &
 PID=$!
 
 # Wait for health endpoint

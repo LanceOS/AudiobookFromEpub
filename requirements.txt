@@ -1,0 +1,11 @@
+torch
+torchaudio
+numpy
+soundfile
+librosa
+ebooklib
+beautifulsoup4
+lxml
+tqdm
+sentencepiece
+scipy

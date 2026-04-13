@@ -31,6 +31,98 @@ function formatBytes(bytes) {
   return `${value.toFixed(value >= 10 ? 0 : 1)} ${units[power]}`;
 }
 
+function formatDateTime(value) {
+  if (!value) return "not available";
+
+  const parsed = value instanceof Date ? value : new Date(value);
+  if (Number.isNaN(parsed.getTime())) {
+    return String(value);
+  }
+
+  return new Intl.DateTimeFormat(undefined, {
+    dateStyle: "medium",
+    timeStyle: "medium",
+  }).format(parsed);
+}
+
+function formatDuration(seconds) {
+  if (seconds === null || seconds === undefined || seconds === "") {
+    return "not available";
+  }
+
+  const totalSeconds = Math.max(0, Math.round(Number(seconds)));
+  if (Number.isNaN(totalSeconds)) {
+    return "not available";
+  }
+
+  const hours = Math.floor(totalSeconds / 3600);
+  const minutes = Math.floor((totalSeconds % 3600) / 60);
+  const remainingSeconds = totalSeconds % 60;
+
+  const parts = [];
+  if (hours) parts.push(`${hours}h`);
+  if (minutes || hours) parts.push(`${minutes}m`);
+  parts.push(`${remainingSeconds}s`);
+  return parts.join(" ");
+}
+
+function addSeconds(isoValue, seconds) {
+  if (!isoValue || seconds === null || seconds === undefined) {
+    return null;
+  }
+
+  const parsed = new Date(isoValue);
+  if (Number.isNaN(parsed.getTime())) {
+    return null;
+  }
+
+  return new Date(parsed.getTime() + Number(seconds) * 1000);
+}
+
+function renderJobDetails(statusData) {
+  const container = byId("jobDetails");
+  container.innerHTML = "";
+
+  const grid = document.createElement("div");
+  grid.className = "job-meta-grid";
+
+  const estimatedSeconds = statusData.estimated_seconds;
+  const startedAt = statusData.started_at;
+  const finishedAt = statusData.finished_at;
+  const predictedFinish = addSeconds(startedAt, estimatedSeconds);
+
+  const rows = [
+    ["Job", statusData.id],
+    ["Detected Chapters", statusData.chapters_count],
+    ["Run Folder", statusData.run_folder || "not created yet"],
+    ["Started", startedAt ? formatDateTime(startedAt) : "waiting to start"],
+    ["Last Updated", formatDateTime(statusData.updated_at)],
+    ["Predicted Duration", formatDuration(estimatedSeconds)],
+    ["Predicted Finish", predictedFinish ? formatDateTime(predictedFinish) : "waiting to start"],
+    ["Finished", finishedAt ? formatDateTime(finishedAt) : (['completed', 'failed'].includes(statusData.status) ? "not available" : "in progress")],
+    ["Time Taken", statusData.elapsed_seconds !== null && statusData.elapsed_seconds !== undefined ? formatDuration(statusData.elapsed_seconds) : (startedAt ? "in progress" : "not started")],
+  ];
+
+  rows.forEach(([label, value]) => {
+    const item = document.createElement("div");
+    item.className = "job-meta-item";
+
+    const labelEl = document.createElement("span");
+    labelEl.className = "job-meta-label";
+    labelEl.textContent = label;
+
+    const valueEl = document.createElement("span");
+    valueEl.className = "job-meta-value";
+    valueEl.textContent = value === null || value === undefined || value === "" ? "not available" : String(value);
+
+    item.appendChild(labelEl);
+    item.appendChild(valueEl);
+    grid.appendChild(item);
+  });
+
+  container.appendChild(grid);
+}
+
 function renderFiles(files) {
   const list = byId("fileList");
   list.innerHTML = "";
@@ -107,12 +199,7 @@ async function refreshJob() {
     byId("progressBar").value = statusData.progress || 0;
     byId("statusMessage").textContent = statusData.error || statusData.message || "";
 
-    byId("jobDetails").innerHTML = `
-      <div>Job: ${statusData.id}</div>
-      <div>Detected Chapters: ${statusData.chapters_count}</div>
-      <div>Run Folder: ${statusData.run_folder || "not created yet"}</div>
-      <div>Updated: ${statusData.updated_at}</div>
-    `;
+    renderJobDetails(statusData);
 
     renderFiles(filesData.files || []);
 

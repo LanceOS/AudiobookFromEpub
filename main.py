@@ -232,6 +232,38 @@ def is_valid_job_id(job_id: str) -> bool:
     return bool(JOB_ID_RE.fullmatch((job_id or "").strip()))
 
 
+def estimate_generation_seconds(job: Dict, mode: str) -> int:
+    chapters = job.get("chapters") or []
+    chapter_count = max(1, len(chapters))
+    total_chars = sum(len(str(chapter.get("text", ""))) for chapter in chapters)
+    mode_factor = 1 if mode == "single" else 2
+    estimated = 15 + (chapter_count * (6 * mode_factor)) + int(total_chars / (900 / mode_factor))
+    return max(15, estimated)
+
+
+def iso_to_epoch(value: Optional[str]) -> Optional[float]:
+    if not value:
+        return None
+
+    try:
+        normalized = str(value).replace("Z", "+00:00")
+        return datetime.fromisoformat(normalized).timestamp()
+    except Exception:
+        return None
+
+
+def calculate_elapsed_seconds(started_at: Optional[str], finished_at: Optional[str] = None) -> Optional[float]:
+    start_epoch = iso_to_epoch(started_at)
+    if start_epoch is None:
+        return None
+
+    end_epoch = iso_to_epoch(finished_at) if finished_at else time.time()
+    if end_epoch is None:
+        return None
+
+    return round(max(0.0, end_epoch - start_epoch), 1)
+
+
 def should_enable_cleanup() -> bool:
     return os.getenv("AUDIOBOOK_ENABLE_CLEANUP", "1").strip().lower() in {"1", "true", "yes", "on"}
 
@@ -702,8 +734,10 @@ def run_generation_job(job_id: str) -> None:
     if not job:
         return
 
+    started_at = now_iso()
+
     try:
-        update_job(job_id, status="running", progress=5, message="Preparing generation job...")
+        update_job(job_id, status="running", progress=5, message="Preparing generation job...", started_at=started_at)
 
         output_dir = Path(job["config"]["output_dir"])
         run_folder = create_run_folder(output_dir, job["config"]["output_name"])
@@ -753,6 +787,8 @@ def run_generation_job(job_id: str) -> None:
                 message=f"Test-mode generation complete. Created {len(generated_files)} file(s).",
                 generated_files=generated_files,
                 error=None,
+                finished_at=now_iso(),
+                elapsed_seconds=calculate_elapsed_seconds(started_at),
             )
             return
 
@@ -783,10 +819,20 @@ def run_generation_job(job_id: str) -> None:
             message=f"Generation complete. Created {len(generated_files)} file(s).",
             generated_files=generated_files,
             error=None,
+            finished_at=now_iso(),
+            elapsed_seconds=calculate_elapsed_seconds(started_at),
         )
     except Exception as exc:
         logging.exception("Generation job failed: %s", exc)
-        update_job(job_id, status="failed", progress=100, message="Generation failed.", error=str(exc))
+        update_job(
+            job_id,
+            status="failed",
+            progress=100,
+            message="Generation failed.",
+            error=str(exc),
+            finished_at=now_iso(),
+            elapsed_seconds=calculate_elapsed_seconds(started_at),
+        )
 
 
 @app.get("/")
@@ -853,6 +899,10 @@ def api_upload():
         "progress": 0,
         "message": "EPUB uploaded. Configure options and generate.",
         "error": None,
+        "started_at": None,
+        "finished_at": None,
+        "elapsed_seconds": None,
+        "estimated_seconds": None,
         "upload_path": str(upload_path),
         "detected_title": detected_title,
         "chapters_count": len(chapters),
@@ -923,6 +973,8 @@ def api_generate():
     if voice not in VOICE_OPTIONS:
         return jsonify({"error": "Unsupported voice."}), 400
 
+    estimated_seconds = estimate_generation_seconds(job, mode)
+
     config = {
         "output_dir": str(output_dir),
         "output_name": output_name,
@@ -939,6 +991,10 @@ def api_generate():
         error=None,
         generated_files=[],
         run_folder=None,
+        started_at=None,
+        finished_at=None,
+        elapsed_seconds=None,
+        estimated_seconds=estimated_seconds,
         config=config,
     )
 
@@ -964,6 +1020,10 @@ def api_job_status(job_id: str):
             "progress": job["progress"],
             "message": job["message"],
             "error": job["error"],
+            "started_at": job.get("started_at"),
+            "finished_at": job.get("finished_at"),
+            "elapsed_seconds": job.get("elapsed_seconds"),
+            "estimated_seconds": job.get("estimated_seconds"),
             "detected_title": job["detected_title"],
             "chapters_count": job["chapters_count"],
             "run_folder": job["run_folder"],

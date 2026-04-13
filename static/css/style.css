@@ -243,6 +243,34 @@ progress {
   font-size: 0.92rem;
 }
 
+.job-meta-grid {
+  display: grid;
+  gap: 0.55rem;
+}
+
+.job-meta-item {
+  display: grid;
+  gap: 0.18rem;
+  padding: 0.55rem 0.62rem;
+  border: 1px solid #d8d2c6;
+  border-radius: 10px;
+  background: #faf8f2;
+}
+
+.job-meta-label {
+  color: var(--muted);
+  font-size: 0.74rem;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.job-meta-value {
+  color: var(--ink);
+  font-size: 0.95rem;
+  font-weight: 700;
+  word-break: break-word;
+}
+
 .file-list {
   list-style: none;
   margin: 0;

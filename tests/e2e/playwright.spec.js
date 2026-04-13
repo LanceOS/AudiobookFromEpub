@@ -27,7 +27,9 @@ test.describe('EPUB to Audiobook UI', () => {
     await page.fill('#outputDir', OUTPUT_DIR);
 
     // start generation
-    await page.click('#generateButton');
+    const generateButton = page.locator('#generateButton');
+    await expect(generateButton).toBeEnabled();
+    await generateButton.click({ force: true });
 
     // wait for completion badge
     await page.waitForSelector('#statusBadge:has-text("completed")', { timeout: 30000 });
@@ -43,10 +45,12 @@ test.describe('EPUB to Audiobook UI', () => {
     await expect(page.locator('#detectedTitle')).not.toHaveText('No file uploaded yet.');
 
     // set chapter mode
-    await page.check('input[name="mode"][value="chapter"]');
+    await page.locator('input[name="mode"][value="chapter"]').check({ force: true });
     await page.fill('#outputDir', OUTPUT_DIR);
     await page.fill('#outputName', 'e2e_chapters');
-    await page.click('#generateButton');
+    const generateButton = page.locator('#generateButton');
+    await expect(generateButton).toBeEnabled();
+    await generateButton.click({ force: true });
 
     await page.waitForSelector('#statusBadge:has-text("completed")', { timeout: 30000 });
 

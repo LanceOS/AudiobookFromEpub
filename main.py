@@ -19,6 +19,7 @@ import re
 import secrets
 import shutil
 import threading
+import time
 import uuid
 import sys
 from datetime import datetime, timezone
@@ -80,9 +81,29 @@ JOBS: Dict[str, Dict] = {}
 JOBS_LOCK = threading.Lock()
 PIPELINE_CACHE: Dict[str, Dict] = {}
 PIPELINE_LOCK = threading.Lock()
+RATE_LIMITS = {
+    "upload": (30, 60),
+    "generate": (30, 60),
+    "jobs": (600, 60),
+}
+RATE_LIMIT_STATE: Dict[str, List[float]] = {}
+RATE_LIMIT_LOCK = threading.Lock()
+CLEANUP_LOCK = threading.Lock()
+CLEANUP_LAST_RUN = 0.0
+
+
+def max_upload_bytes_from_env() -> int:
+    default_mb = 50
+    raw = os.getenv("AUDIOBOOK_MAX_UPLOAD_MB", str(default_mb)).strip()
+    try:
+        mb = int(raw)
+    except ValueError:
+        mb = default_mb
+    mb = max(1, min(mb, 512))
+    return mb * 1024 * 1024
 
 app = Flask(__name__, template_folder="templates", static_folder="static")
-app.config["MAX_CONTENT_LENGTH"] = 200 * 1024 * 1024
+app.config["MAX_CONTENT_LENGTH"] = max_upload_bytes_from_env()
 app.secret_key = os.getenv("AUDIOBOOK_SECRET_KEY") or secrets.token_hex(32)
 app.config["SESSION_COOKIE_HTTPONLY"] = True
 app.config["SESSION_COOKIE_SAMESITE"] = "Lax"
@@ -103,6 +124,7 @@ def ensure_app_dirs() -> None:
     UPLOADS_DIR.mkdir(parents=True, exist_ok=True)
     JOB_META_DIR.mkdir(parents=True, exist_ok=True)
     DEFAULT_OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    maybe_cleanup_stale_data()
 
 
 def slugify(value: str, fallback: str = "untitled") -> str:
@@ -210,6 +232,103 @@ def is_valid_job_id(job_id: str) -> bool:
     return bool(JOB_ID_RE.fullmatch((job_id or "").strip()))
 
 
+def should_enable_cleanup() -> bool:
+    return os.getenv("AUDIOBOOK_ENABLE_CLEANUP", "1").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def cleanup_max_age_seconds() -> int:
+    raw = os.getenv("AUDIOBOOK_CLEANUP_AGE_HOURS", "168").strip()
+    try:
+        hours = int(raw)
+    except ValueError:
+        hours = 168
+    hours = max(1, min(hours, 24 * 365))
+    return hours * 3600
+
+
+def cleanup_interval_seconds() -> int:
+    raw = os.getenv("AUDIOBOOK_CLEANUP_INTERVAL_SECONDS", "600").strip()
+    try:
+        interval = int(raw)
+    except ValueError:
+        interval = 600
+    return max(60, min(interval, 86400))
+
+
+def maybe_cleanup_stale_data() -> None:
+    global CLEANUP_LAST_RUN
+
+    if not should_enable_cleanup():
+        return
+
+    now = time.time()
+    interval = cleanup_interval_seconds()
+    with CLEANUP_LOCK:
+        if now - CLEANUP_LAST_RUN < interval:
+            return
+        CLEANUP_LAST_RUN = now
+
+    cutoff = now - cleanup_max_age_seconds()
+
+    for upload_dir in UPLOADS_DIR.iterdir():
+        try:
+            if upload_dir.stat().st_mtime < cutoff:
+                shutil.rmtree(upload_dir, ignore_errors=True)
+        except FileNotFoundError:
+            continue
+
+    for meta_file in JOB_META_DIR.glob("*.json"):
+        try:
+            if meta_file.stat().st_mtime < cutoff:
+                meta_file.unlink(missing_ok=True)
+        except FileNotFoundError:
+            continue
+
+
+def looks_like_valid_epub(epub_path: Path) -> bool:
+    try:
+        if epub_path.stat().st_size < 4:
+            return False
+
+        with epub_path.open("rb") as fh:
+            if fh.read(4) != b"PK\x03\x04":
+                return False
+
+        import zipfile
+
+        with zipfile.ZipFile(epub_path, "r") as archive:
+            names = set(archive.namelist())
+            if "mimetype" not in names or "META-INF/container.xml" not in names:
+                return False
+            mimetype = archive.read("mimetype").decode("utf-8", errors="ignore").strip()
+            if mimetype != "application/epub+zip":
+                return False
+
+        return True
+    except Exception:
+        return False
+
+
+def rate_limit_bucket_for_request() -> Tuple[Optional[str], int, int]:
+    if request.path == "/api/upload":
+        limit, window = RATE_LIMITS["upload"]
+        return "upload", limit, window
+    if request.path == "/api/generate":
+        limit, window = RATE_LIMITS["generate"]
+        return "generate", limit, window
+    if request.path.startswith("/api/jobs/"):
+        limit, window = RATE_LIMITS["jobs"]
+        return "jobs", limit, window
+    return None, 0, 0
+
+
+def client_identifier() -> str:
+    forwarded_for = (request.headers.get("X-Forwarded-For") or "").split(",")[0].strip()
+    if forwarded_for:
+        return forwarded_for
+    return request.remote_addr or "unknown"
+
+
 def create_run_folder(output_dir: Path, base_name: str) -> Path:
     stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     root = f"{slugify(base_name, fallback='audiobook')}_{stamp}"
@@ -307,6 +426,27 @@ def enforce_api_csrf():
     provided = str(request.headers.get("X-CSRF-Token") or "")
     if not expected or not provided or not hmac.compare_digest(provided, expected):
         return jsonify({"error": "Invalid CSRF token."}), 403
+
+    return None
+
+
+@app.before_request
+def enforce_rate_limit():
+    if not request.path.startswith("/api/"):
+        return None
+
+    bucket, limit, window = rate_limit_bucket_for_request()
+    if not bucket:
+        return None
+
+    now = time.time()
+    key = f"{bucket}:{client_identifier()}"
+    with RATE_LIMIT_LOCK:
+        recent = [stamp for stamp in RATE_LIMIT_STATE.get(key, []) if now - stamp < window]
+        if len(recent) >= limit:
+            return jsonify({"error": "Rate limit exceeded. Please retry shortly."}), 429
+        recent.append(now)
+        RATE_LIMIT_STATE[key] = recent
 
     return None
 
@@ -676,6 +816,10 @@ def api_upload():
     upload_dir.mkdir(parents=True, exist_ok=True)
     upload_path = upload_dir / "input.epub"
     incoming.save(upload_path)
+
+    if not is_test_mode() and not looks_like_valid_epub(upload_path):
+        shutil.rmtree(upload_dir, ignore_errors=True)
+        return jsonify({"error": "Invalid EPUB structure."}), 400
 
     try:
         detected_title = extract_book_title(upload_path)

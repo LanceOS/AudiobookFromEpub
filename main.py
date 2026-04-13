@@ -18,6 +18,7 @@ import re
 import shutil
 import threading
 import uuid
+import sys
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
@@ -25,8 +26,17 @@ from typing import Dict, List, Optional, Tuple
 import numpy as np
 # Lazy-import heavy audio/torch libraries when necessary to allow test-mode
 # Lazy-import EPUB parsing and HTML parsing libraries when needed
-from flask import Flask, jsonify, render_template, request, send_from_directory  # type: ignore[reportMissingImports]
-from werkzeug.utils import secure_filename  # type: ignore[reportMissingImports]
+try:
+    from flask import Flask, jsonify, render_template, request, send_from_directory  # type: ignore[reportMissingImports]
+    from werkzeug.utils import secure_filename  # type: ignore[reportMissingImports]
+except Exception as exc:  # pragma: no cover - helpful user-facing error
+    sys.stderr.write("Missing required Python package 'flask' or 'werkzeug'.\n")
+    sys.stderr.write("Fix: either activate the project venv or install requirements:\n")
+    sys.stderr.write("  source .venv/bin/activate\n")
+    sys.stderr.write("  pip install -r requirements.txt\n")
+    sys.stderr.write("Or install Flask directly: pip install flask\n")
+    sys.stderr.write("Then re-run: python main.py\n")
+    raise
 
 try:
     from kokoro import KPipeline  # type: ignore[reportMissingImports]

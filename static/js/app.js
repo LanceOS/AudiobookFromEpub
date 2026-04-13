@@ -231,10 +231,10 @@ async function uploadEpubFile(file) {
   const formData = new FormData();
   formData.append("epub", file);
 
-  // Include user preference for skipping front/back matter and notes
-  const skipEl = byId("skipFrontMatter");
-  const skipVal = skipEl ? (skipEl.checked ? "1" : "0") : "1";
-  formData.append("skip_front_matter", skipVal);
+  // Include user-selected filter level for front/back matter
+  const filterEl = byId("filterLevel");
+  const filterVal = filterEl ? filterEl.value : "default";
+  formData.append("filter_level", filterVal);
 
   const csrfToken = getCsrfToken();
   if (!csrfToken) {

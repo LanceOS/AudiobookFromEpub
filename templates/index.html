@@ -57,11 +57,14 @@
         </div>
 
         <div class="field-group">
-          <label for="skipFrontMatter">Skip front/back matter &amp; notes</label>
-          <div class="checkbox-row">
-            <label><input id="skipFrontMatter" type="checkbox" checked /> Omit preface, TOC, acknowledgements, and endnotes</label>
-          </div>
-          <p class="hint">Recommended for audiobooks — skips non-narrative sections.</p>
+          <label for="filterLevel">Filter Level</label>
+          <select id="filterLevel">
+            <option value="default" selected>Default — skip common front/back matter (recommended)</option>
+            <option value="conservative">Conservative — skip only obvious TOC/publisher pages</option>
+            <option value="aggressive">Aggressive — also skip introductions, author notes</option>
+            <option value="off">Off — include everything</option>
+          </select>
+          <p class="hint">Choose how aggressively to omit non-narrative sections.</p>
         </div>
 
         <div class="field-group">

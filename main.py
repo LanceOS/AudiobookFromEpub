@@ -673,7 +673,98 @@ def extract_book_title(epub_path: Path) -> str:
     return epub_path.stem
 
 
-def extract_chapters_from_epub(epub_path: Path, skip_front_matter: bool = True) -> List[Dict[str, str]]:
+def _normalize_filter_level(filter_level: str) -> str:
+    level = (filter_level or "default").lower()
+    if level not in {"off", "conservative", "default", "aggressive"}:
+        return "default"
+    return level
+
+
+def _looks_like_nav_toc(soup, level: str) -> bool:
+    nav = soup.find("nav")
+    if not nav:
+        return False
+
+    nav_text = nav.get_text(separator=" ", strip=True).lower()
+    li_count = len(nav.find_all("li"))
+
+    if level == "conservative":
+        return "table of contents" in nav_text or "contents" in nav_text or li_count > 8
+
+    return "table of contents" in nav_text or "contents" in nav_text or li_count > 4
+
+
+def _should_skip_chapter(
+    chapter_title: str,
+    text: str,
+    level: str,
+    *,
+    allow_nav_only_fallback: bool = False,
+    book_title: str = "",
+    nav_toc: bool = False,
+) -> bool:
+    if level == "off":
+        return False
+
+    nm_title = (chapter_title or "").lower()
+    nm_text = text.lower()
+    word_count = len(text.split())
+    sentence_count = nm_text.count(".") + nm_text.count("!") + nm_text.count("?")
+    normalized_book_title = (book_title or "").strip().lower()
+
+    conservative = level == "conservative"
+    aggressive = level == "aggressive"
+
+    if allow_nav_only_fallback:
+        if nav_toc:
+            if not normalized_book_title or nm_title != normalized_book_title or word_count < 200:
+                return True
+        if normalized_book_title and nm_title == normalized_book_title and word_count < 200:
+            return True
+
+        head_chunk = nm_text[:400]
+        if head_chunk.strip().startswith("contents") and word_count < 200:
+            return True
+        if head_chunk.strip().startswith("notes") or head_chunk.strip().startswith("endnotes"):
+            return True
+        return False
+
+    if conservative:
+        front_re = re.compile(r'\b(table of contents|contents|toc|dedication|colophon|errata|index|appendix)\b', re.IGNORECASE)
+        if front_re.search(nm_title) and word_count < 200:
+            return True
+        if nav_toc:
+            return True
+        return False
+
+    front_re = re.compile(
+        r'\b(preface|foreword|introduction|acknowledg|table of contents|contents|toc|dedication|colophon|errata|bibliograph|appendix|references|about the author|publisher|bibliography|note|notes|endnotes|index)\b',
+        re.IGNORECASE,
+    )
+
+    if front_re.search(nm_title):
+        if aggressive:
+            if word_count < 600 and sentence_count < 6:
+                return True
+        else:
+            if word_count < 300 and sentence_count < 4:
+                return True
+
+    if nav_toc:
+        return True
+
+    head_chunk = nm_text[:400]
+    limit = 700 if aggressive else 400
+    if ("table of contents" in head_chunk or head_chunk.strip().startswith("contents")) and word_count < limit:
+        return True
+
+    if head_chunk.strip().startswith("notes") or head_chunk.strip().startswith("endnotes"):
+        return True
+
+    return False
+
+
+def extract_chapters_from_epub(epub_path: Path, filter_level: str = "default") -> List[Dict[str, str]]:
     # Lazy-import parsing libraries so the app can run in environments
     # without ebooklib when in test mode.
     try:
@@ -689,7 +780,11 @@ def extract_chapters_from_epub(epub_path: Path, skip_front_matter: bool = True) 
         raise
 
     book = _epub.read_epub(str(epub_path))
+    book_metadata = book.get_metadata("DC", "title")
+    book_title = book_metadata[0][0].strip() if book_metadata and book_metadata[0] and book_metadata[0][0] else epub_path.stem
     chapters: List[Dict[str, str]] = []
+    raw_chapters: List[Dict[str, str]] = []
+    level = _normalize_filter_level(filter_level)
 
     try:
         items = list(book.get_items_of_type(_ebooklib.ITEM_DOCUMENT))
@@ -726,36 +821,16 @@ def extract_chapters_from_epub(epub_path: Path, skip_front_matter: bool = True) 
         else:
             chapter_title = f"Chapter {len(chapters) + 1}"
 
+        nav_toc = _looks_like_nav_toc(soup, level)
+        raw_chapters.append({
+            "title": chapter_title,
+            "text": text,
+            "nav_toc": nav_toc,
+        })
+
         # Heuristics: optionally skip common front/back matter (preface, TOC, notes).
-        if skip_front_matter:
-            nm_title = (chapter_title or "").lower()
-            nm_text = text.lower()
-
-            front_re = re.compile(
-                r'\b(preface|foreword|introduction|acknowledg|table of contents|contents|toc|dedication|colophon|errata|bibliograph|appendix|references|about the author|publisher|bibliography|note|notes|endnotes|index)\b',
-                re.IGNORECASE,
-            )
-
-            # Skip obvious front-matter titles ("Preface", "Acknowledgements", etc.)
-            if front_re.search(nm_title):
-                continue
-
-            # Detect explicit nav-based table-of-contents
-            nav = soup.find("nav")
-            if nav:
-                nav_text = nav.get_text(separator=" ", strip=True).lower()
-                li_count = len(nav.find_all("li"))
-                if "table of contents" in nav_text or "contents" in nav_text or li_count > 4:
-                    continue
-
-            # Skip short pages that look like TOC or publisher notes
-            head_chunk = nm_text[:400]
-            if ("table of contents" in head_chunk or head_chunk.strip().startswith("contents")) and len(text.split()) < 400:
-                continue
-
-            # Skip short pages that explicitly begin with "notes" or "endnotes"
-            if head_chunk.strip().startswith("notes") or head_chunk.strip().startswith("endnotes"):
-                continue
+        if _should_skip_chapter(chapter_title, text, level, book_title=book_title, nav_toc=nav_toc):
+            continue
 
         chapters.append({
             "index": str(len(chapters) + 1),
@@ -764,7 +839,41 @@ def extract_chapters_from_epub(epub_path: Path, skip_front_matter: bool = True) 
         })
 
     if not chapters:
-        raise ValueError("No readable chapter text found in EPUB.")
+        if raw_chapters and level != "off":
+            fallback_level = "conservative"
+            fallback_chapters = []
+            for raw_chapter in raw_chapters:
+                if _should_skip_chapter(
+                    raw_chapter["title"],
+                    raw_chapter["text"],
+                    fallback_level,
+                    book_title=book_title,
+                    nav_toc=bool(raw_chapter.get("nav_toc")),
+                ):
+                    continue
+                fallback_chapters.append(
+                    {
+                        "index": str(len(fallback_chapters) + 1),
+                        "title": raw_chapter["title"],
+                        "text": raw_chapter["text"],
+                    }
+                )
+
+            if fallback_chapters:
+                chapters = fallback_chapters
+            else:
+                # Keep the upload usable, but avoid restoring obvious nav-heavy documents.
+                chapters = [
+                    {
+                        "index": str(i + 1),
+                        "title": ch["title"],
+                        "text": ch["text"],
+                    }
+                    for i, ch in enumerate(raw_chapters)
+                    if not ch.get("nav_toc")
+                ]
+        else:
+            raise ValueError("No readable chapter text found in EPUB.")
 
     return chapters
 
@@ -977,15 +1086,25 @@ def api_upload():
         shutil.rmtree(upload_dir, ignore_errors=True)
         return jsonify({"error": "Invalid EPUB structure."}), 400
 
+    # Ensure `filter_level` is defined even if EPUB parsing fails early
+    filter_level = "default"
+
     try:
         detected_title = extract_book_title(upload_path)
-        # Allow clients to request skipping front/back matter and notes.
-        # Default behavior is to skip these sections for cleaner audiobooks.
-        skip_front = True
-        raw_skip = request.form.get("skip_front_matter")
-        if raw_skip is not None:
-            skip_front = str(raw_skip).lower() in ("1", "true", "yes", "on")
-        chapters = extract_chapters_from_epub(upload_path, skip_front_matter=skip_front)
+        # Allow clients to request filter level for front/back matter.
+        # Supported values: off, conservative, default, aggressive
+        raw_filter = request.form.get("filter_level")
+        if raw_filter:
+            filter_level = str(raw_filter).lower()
+        else:
+            # Backwards-compatible support for the old boolean flag
+            raw_skip = request.form.get("skip_front_matter")
+            if raw_skip is not None:
+                filter_level = "default" if str(raw_skip).lower() in ("1", "true", "yes", "on") else "off"
+            else:
+                filter_level = "default"
+
+        chapters = extract_chapters_from_epub(upload_path, filter_level=filter_level)
     except Exception as exc:
         if is_test_mode():
             # In test mode, tolerate invalid EPUB bytes and provide a simple fallback
@@ -1014,12 +1133,13 @@ def api_upload():
         "chapters": chapters,
         "run_folder": None,
         "generated_files": [],
-        "config": {
+                "config": {
             "output_dir": str(DEFAULT_OUTPUT_DIR),
             "output_name": suggested_name,
             "mode": "single",
             "voice": "af_heart",
             "device": "cpu",
+            "filter_level": filter_level,
         },
     }
 

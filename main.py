@@ -892,6 +892,17 @@ def api_generate():
     if mode not in {"single", "chapter"}:
         return jsonify({"error": "mode must be 'single' or 'chapter'."}), 400
 
+    if not is_test_mode() and not HAS_KOKORO:
+        return jsonify(
+            {
+                "error": (
+                    "Kokoro is unavailable in this Python environment "
+                    f"({KOKORO_IMPORT_ERROR}). Activate kokoro_venv (Python 3.12) "
+                    "and install requirements, or run in test mode with AUDIOBOOK_TEST_MODE=1."
+                )
+            }
+        ), 400
+
     output_dir, output_err = validate_output_directory(str(data.get("output_dir", "")))
     if output_err:
         return jsonify({"error": output_err}), 400

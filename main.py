@@ -59,6 +59,7 @@ UPLOADS_DIR = APP_DATA_DIR / "uploads"
 JOB_META_DIR = APP_DATA_DIR / "jobs"
 DEFAULT_OUTPUT_DIR = BASE_DIR / "generated_audio"
 ALLOWED_UPLOAD_EXTENSIONS = {".epub"}
+JOB_ID_RE = re.compile(r"^[a-f0-9]{32}$")
 
 VOICE_OPTIONS = [
     "af_heart",
@@ -205,6 +206,10 @@ def validate_generated_file_request(job: Dict, filename: str) -> Tuple[Optional[
     return safe_name, None
 
 
+def is_valid_job_id(job_id: str) -> bool:
+    return bool(JOB_ID_RE.fullmatch((job_id or "").strip()))
+
+
 def create_run_folder(output_dir: Path, base_name: str) -> Path:
     stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     root = f"{slugify(base_name, fallback='audiobook')}_{stamp}"
@@ -304,6 +309,22 @@ def enforce_api_csrf():
         return jsonify({"error": "Invalid CSRF token."}), 403
 
     return None
+
+
+@app.after_request
+def add_security_headers(response):
+    response.headers.setdefault("X-Content-Type-Options", "nosniff")
+    response.headers.setdefault("X-Frame-Options", "DENY")
+    response.headers.setdefault("Referrer-Policy", "no-referrer")
+    response.headers.setdefault("Permissions-Policy", "geolocation=(), microphone=(), camera=()")
+    response.headers.setdefault(
+        "Content-Security-Policy",
+        "default-src 'self'; base-uri 'self'; frame-ancestors 'none'; form-action 'self'; "
+        "img-src 'self' data:; script-src 'self'; style-src 'self'; connect-src 'self'",
+    )
+    if (request.headers.get("X-Forwarded-Proto") or "").strip().lower() == "https":
+        response.headers.setdefault("Strict-Transport-Security", "max-age=31536000; includeSubDomains")
+    return response
 
 
 def voice_to_lang_code(voice: str) -> str:
@@ -713,6 +734,8 @@ def api_generate():
     job_id = str(data.get("job_id", "")).strip()
     if not job_id:
         return jsonify({"error": "job_id is required."}), 400
+    if not is_valid_job_id(job_id):
+        return jsonify({"error": "job_id format is invalid."}), 400
 
     job = get_job(job_id)
     if not job:
@@ -761,6 +784,9 @@ def api_generate():
 
 @app.get("/api/jobs/<job_id>/status")
 def api_job_status(job_id: str):
+    if not is_valid_job_id(job_id):
+        return jsonify({"error": "job_id format is invalid."}), 400
+
     job = get_job(job_id)
     if not job:
         return jsonify({"error": "Job not found."}), 404
@@ -782,6 +808,9 @@ def api_job_status(job_id: str):
 
 @app.get("/api/jobs/<job_id>/files")
 def api_job_files(job_id: str):
+    if not is_valid_job_id(job_id):
+        return jsonify({"error": "job_id format is invalid."}), 400
+
     job = get_job(job_id)
     if not job:
         return jsonify({"error": "Job not found."}), 404
@@ -794,6 +823,9 @@ def api_job_files(job_id: str):
 
 @app.get("/api/jobs/<job_id>/file/<path:filename>")
 def api_job_file(job_id: str, filename: str):
+    if not is_valid_job_id(job_id):
+        return jsonify({"error": "job_id format is invalid."}), 400
+
     job = get_job(job_id)
     if not job:
         return jsonify({"error": "Job not found."}), 404
@@ -809,6 +841,9 @@ def api_job_file(job_id: str, filename: str):
 
 @app.get("/api/jobs/<job_id>/download/<path:filename>")
 def api_job_download(job_id: str, filename: str):
+    if not is_valid_job_id(job_id):
+        return jsonify({"error": "job_id format is invalid."}), 400
+
     job = get_job(job_id)
     if not job:
         return jsonify({"error": "Job not found."}), 404
@@ -833,6 +868,8 @@ def parse_args() -> argparse.Namespace:
 def main() -> None:
     ensure_app_dirs()
     args = parse_args()
+    if args.debug and os.getenv("AUDIOBOOK_ALLOW_DEBUG", "").strip().lower() not in {"1", "true", "yes", "on"}:
+        raise SystemExit("Refusing --debug startup. Set AUDIOBOOK_ALLOW_DEBUG=1 to override.")
     print(f"Open the app at http://{args.host}:{args.port}")
     app.run(host=args.host, port=args.port, debug=args.debug)
 

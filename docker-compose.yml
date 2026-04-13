@@ -1,0 +1,27 @@
+services:
+  audiobook-app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: audiobook-from-epub
+    ports:
+      - "5000:5000"
+    environment:
+      AUDIOBOOK_ALLOWED_OUTPUT_ROOT: /app/output
+      AUDIOBOOK_MAX_UPLOAD_MB: ${AUDIOBOOK_MAX_UPLOAD_MB:-50}
+      AUDIOBOOK_COOKIE_SECURE: ${AUDIOBOOK_COOKIE_SECURE:-0}
+      AUDIOBOOK_SECRET_KEY: ${AUDIOBOOK_SECRET_KEY:-replace-me-with-a-secure-key}
+      AUDIOBOOK_ENABLE_CLEANUP: ${AUDIOBOOK_ENABLE_CLEANUP:-1}
+      AUDIOBOOK_CLEANUP_AGE_HOURS: ${AUDIOBOOK_CLEANUP_AGE_HOURS:-168}
+    volumes:
+      - ${AUDIOBOOK_OUTPUT_DIR:?AUDIOBOOK_OUTPUT_DIR is required and must point to a host directory}:/app/output
+      - audiobook_app_data:/app/.app_data
+    restart: unless-stopped
+    read_only: true
+    tmpfs:
+      - /tmp
+    security_opt:
+      - no-new-privileges:true
+
+volumes:
+  audiobook_app_data:

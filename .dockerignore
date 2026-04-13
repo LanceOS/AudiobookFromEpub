@@ -1,0 +1,15 @@
+.git
+.github
+.venv
+kokoro_venv
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache
+.app_data
+generated_audio
+tests/e2e/node_modules
+tests/e2e/test-results
+tests/e2e/playwright-report
+*.log

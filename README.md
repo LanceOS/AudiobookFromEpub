@@ -64,7 +64,7 @@ source .venv/bin/activate
 python smoke_test.py
 ```
 
-Note: `final_status` may be `failed` in `.venv` due Kokoro dependency limits on Python 3.14. The smoke test is focused on API workflow.
+The smoke test uses `AUDIOBOOK_TEST_MODE=1` and validates API workflow regardless of local Kokoro availability.
 
 ## Output Structure
 
@@ -73,3 +73,38 @@ When generation starts, a new folder is created inside your selected output dire
 - `<chosen_output_dir>/<output_name>_<timestamp>/`
 
 Generated WAV files are placed in that run folder.
+
+## Docker Compose (Hostable)
+
+The repository includes a hostable container setup:
+
+- `Dockerfile`
+- `docker-compose.yml`
+
+`docker-compose.yml` requires a host output directory via `AUDIOBOOK_OUTPUT_DIR`.
+If this variable is missing, compose fails fast.
+
+Example:
+
+```bash
+cd /home/lance/Documents/Code/AudiobookFromEpub
+export AUDIOBOOK_OUTPUT_DIR=/absolute/path/on/host/audiobook_output
+export AUDIOBOOK_SECRET_KEY="replace-with-a-long-random-secret"
+docker compose up --build -d
+```
+
+Open:
+
+- `http://127.0.0.1:5000`
+
+Container notes:
+
+- Generated audio is written to the required host bind mount (`AUDIOBOOK_OUTPUT_DIR`).
+- Runtime output-root enforcement is enabled with `AUDIOBOOK_ALLOWED_OUTPUT_ROOT=/app/output`.
+- The container runs as non-root with `read_only: true`, `tmpfs: /tmp`, and `no-new-privileges`.
+
+Validate compose configuration:
+
+```bash
+docker compose config
+```

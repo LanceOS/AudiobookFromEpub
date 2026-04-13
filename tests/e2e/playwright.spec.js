@@ -4,6 +4,7 @@ const fs = require('fs');
 
 const BASE = 'http://127.0.0.1:5070';
 const FIXTURE_EPUB = path.join(__dirname, 'fixture.epub');
+const OUTPUT_DIR = path.resolve(__dirname, '..', '..', 'generated_audio');
 
 // Helper: ensure fixture epub exists (created by run script) or fail fast
 if (!fs.existsSync(FIXTURE_EPUB)) {
@@ -23,7 +24,7 @@ test.describe('EPUB to Audiobook UI', () => {
 
     // set output name and dir
     await page.fill('#outputName', 'e2e_test_output');
-    await page.fill('#outputDir', '/tmp');
+    await page.fill('#outputDir', OUTPUT_DIR);
 
     // start generation
     await page.click('#generateButton');
@@ -43,7 +44,7 @@ test.describe('EPUB to Audiobook UI', () => {
 
     // set chapter mode
     await page.check('input[name="mode"][value="chapter"]');
-    await page.fill('#outputDir', '/tmp');
+    await page.fill('#outputDir', OUTPUT_DIR);
     await page.fill('#outputName', 'e2e_chapters');
     await page.click('#generateButton');
 

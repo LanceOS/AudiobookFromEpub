@@ -11,10 +11,12 @@ Then open:
 from __future__ import annotations
 
 import argparse
+import hmac
 import json
 import logging
 import os
 import re
+import secrets
 import shutil
 import threading
 import uuid
@@ -22,12 +24,13 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
+from urllib.parse import urlparse
 
 import numpy as np
 # Lazy-import heavy audio/torch libraries when necessary to allow test-mode
 # Lazy-import EPUB parsing and HTML parsing libraries when needed
 try:
-    from flask import Flask, jsonify, render_template, request, send_from_directory  # type: ignore[reportMissingImports]
+    from flask import Flask, jsonify, render_template, request, send_from_directory, session  # type: ignore[reportMissingImports]
     from werkzeug.utils import secure_filename  # type: ignore[reportMissingImports]
 except Exception as exc:  # pragma: no cover - helpful user-facing error
     sys.stderr.write("Missing required Python package 'flask' or 'werkzeug'.\n")
@@ -79,6 +82,15 @@ PIPELINE_LOCK = threading.Lock()
 
 app = Flask(__name__, template_folder="templates", static_folder="static")
 app.config["MAX_CONTENT_LENGTH"] = 200 * 1024 * 1024
+app.secret_key = os.getenv("AUDIOBOOK_SECRET_KEY") or secrets.token_hex(32)
+app.config["SESSION_COOKIE_HTTPONLY"] = True
+app.config["SESSION_COOKIE_SAMESITE"] = "Lax"
+app.config["SESSION_COOKIE_SECURE"] = os.getenv("AUDIOBOOK_COOKIE_SECURE", "0").strip().lower() in {
+    "1",
+    "true",
+    "yes",
+    "on",
+}
 
 
 def now_iso() -> str:
@@ -99,20 +111,98 @@ def slugify(value: str, fallback: str = "untitled") -> str:
     return text or fallback
 
 
+def get_allowed_output_root() -> Tuple[Optional[Path], Optional[str]]:
+    root_text = os.getenv("AUDIOBOOK_ALLOWED_OUTPUT_ROOT", str(DEFAULT_OUTPUT_DIR))
+    root_path = Path(root_text).expanduser()
+    try:
+        resolved_root = root_path.resolve(strict=False)
+        resolved_root.mkdir(parents=True, exist_ok=True)
+    except Exception as exc:
+        return None, f"Configured output root is invalid: {exc}"
+    return resolved_root, None
+
+
 def validate_output_directory(path_text: str) -> Tuple[Optional[Path], Optional[str]]:
     if not path_text or not str(path_text).strip():
         return None, "Output directory is required."
 
+    allowed_root, root_err = get_allowed_output_root()
+    if root_err or not allowed_root:
+        return None, root_err or "Unable to resolve allowed output root."
+
     output_dir = Path(path_text).expanduser()
     try:
-        output_dir.mkdir(parents=True, exist_ok=True)
+        resolved_output = output_dir.resolve(strict=False)
+    except Exception as exc:
+        return None, f"Invalid output directory path: {exc}"
+
+    try:
+        resolved_output.relative_to(allowed_root)
+    except ValueError:
+        return None, f"Output directory must be inside allowed root: {allowed_root}"
+
+    try:
+        resolved_output.mkdir(parents=True, exist_ok=True)
     except Exception as exc:
         return None, f"Unable to create output directory: {exc}"
 
-    if not os.access(output_dir, os.W_OK):
+    if not os.access(resolved_output, os.W_OK):
         return None, "Output directory is not writable."
 
-    return output_dir.resolve(), None
+    return resolved_output, None
+
+
+def get_csrf_token() -> str:
+    token = session.get("csrf_token")
+    if not token:
+        token = secrets.token_urlsafe(32)
+        session["csrf_token"] = token
+    return token
+
+
+def is_same_origin_request() -> bool:
+    request_host = request.host.lower()
+    for header_name in ("Origin", "Referer"):
+        header_value = request.headers.get(header_name)
+        if not header_value:
+            continue
+        parsed = urlparse(header_value)
+        if not parsed.netloc:
+            continue
+        if not hmac.compare_digest(parsed.netloc.lower(), request_host):
+            return False
+    return True
+
+
+def validate_generated_file_request(job: Dict, filename: str) -> Tuple[Optional[str], Optional[str]]:
+    run_folder = str(job.get("run_folder") or "").strip()
+    if not run_folder:
+        return None, "No generated files for this job yet."
+
+    if not filename or "/" in filename or "\\" in filename:
+        return None, "Invalid file name."
+
+    safe_name = Path(filename).name
+    if safe_name in {"", ".", ".."} or safe_name != filename:
+        return None, "Invalid file name."
+
+    allowed_files = set(job.get("generated_files") or [])
+    if not allowed_files:
+        allowed_files = {entry["name"] for entry in list_generated_files(job)}
+    if safe_name not in allowed_files:
+        return None, "File not found."
+
+    run_path = Path(run_folder).resolve(strict=False)
+    candidate = (run_path / safe_name).resolve(strict=False)
+    try:
+        candidate.relative_to(run_path)
+    except ValueError:
+        return None, "Invalid file path."
+
+    if not candidate.exists() or not candidate.is_file():
+        return None, "File not found."
+
+    return safe_name, None
 
 
 def create_run_folder(output_dir: Path, base_name: str) -> Path:
@@ -196,6 +286,24 @@ def split_text_into_chunks(text: str, max_chars: int = 700) -> List[str]:
 def is_test_mode() -> bool:
     val = os.getenv("AUDIOBOOK_TEST_MODE", "")
     return str(val).strip().lower() in {"1", "true", "yes", "on"}
+
+
+@app.before_request
+def enforce_api_csrf():
+    if request.method not in {"POST", "PUT", "PATCH", "DELETE"}:
+        return None
+    if not request.path.startswith("/api/"):
+        return None
+
+    if not is_same_origin_request():
+        return jsonify({"error": "Cross-origin requests are not allowed."}), 403
+
+    expected = str(session.get("csrf_token") or "")
+    provided = str(request.headers.get("X-CSRF-Token") or "")
+    if not expected or not provided or not hmac.compare_digest(provided, expected):
+        return jsonify({"error": "Invalid CSRF token."}), 403
+
+    return None
 
 
 def voice_to_lang_code(voice: str) -> str:
@@ -512,9 +620,11 @@ def run_generation_job(job_id: str) -> None:
 @app.get("/")
 def index() -> str:
     ensure_app_dirs()
+    allowed_root, _ = get_allowed_output_root()
     return render_template(
         "index.html",
-        default_output_dir=str(DEFAULT_OUTPUT_DIR),
+        default_output_dir=str(allowed_root or DEFAULT_OUTPUT_DIR),
+        csrf_token=get_csrf_token(),
         voices=VOICE_OPTIONS,
     )
 
@@ -688,11 +798,13 @@ def api_job_file(job_id: str, filename: str):
     if not job:
         return jsonify({"error": "Job not found."}), 404
 
-    run_folder = job.get("run_folder")
-    if not run_folder:
-        return jsonify({"error": "No generated files for this job yet."}), 404
+    safe_name, file_err = validate_generated_file_request(job, filename)
+    if file_err:
+        status = 404 if file_err in {"File not found.", "No generated files for this job yet."} else 400
+        return jsonify({"error": file_err}), status
 
-    return send_from_directory(run_folder, filename, as_attachment=False)
+    run_folder = str(job["run_folder"])
+    return send_from_directory(str(Path(run_folder).resolve(strict=False)), safe_name, as_attachment=False)
 
 
 @app.get("/api/jobs/<job_id>/download/<path:filename>")
@@ -701,11 +813,13 @@ def api_job_download(job_id: str, filename: str):
     if not job:
         return jsonify({"error": "Job not found."}), 404
 
-    run_folder = job.get("run_folder")
-    if not run_folder:
-        return jsonify({"error": "No generated files for this job yet."}), 404
+    safe_name, file_err = validate_generated_file_request(job, filename)
+    if file_err:
+        status = 404 if file_err in {"File not found.", "No generated files for this job yet."} else 400
+        return jsonify({"error": file_err}), status
 
-    return send_from_directory(run_folder, filename, as_attachment=True)
+    run_folder = str(job["run_folder"])
+    return send_from_directory(str(Path(run_folder).resolve(strict=False)), safe_name, as_attachment=True)
 
 
 def parse_args() -> argparse.Namespace:

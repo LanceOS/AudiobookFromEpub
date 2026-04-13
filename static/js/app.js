@@ -7,6 +7,11 @@ function byId(id) {
   return document.getElementById(id);
 }
 
+function getCsrfToken() {
+  const meta = document.querySelector('meta[name="csrf-token"]');
+  return meta ? meta.getAttribute("content") || "" : "";
+}
+
 function selectedMode() {
   const option = document.querySelector('input[name="mode"]:checked');
   return option ? option.value : "single";
@@ -138,8 +143,14 @@ async function uploadEpubFile(file) {
   const formData = new FormData();
   formData.append("epub", file);
 
+  const csrfToken = getCsrfToken();
+  if (!csrfToken) {
+    throw new Error("Missing CSRF token. Refresh the page and try again.");
+  }
+
   const response = await fetch("/api/upload", {
     method: "POST",
+    headers: { "X-CSRF-Token": csrfToken },
     body: formData,
   });
 
@@ -191,9 +202,17 @@ async function generateAudio() {
     mode: selectedMode(),
   };
 
+  const csrfToken = getCsrfToken();
+  if (!csrfToken) {
+    throw new Error("Missing CSRF token. Refresh the page and try again.");
+  }
+
   const response = await fetch("/api/generate", {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: {
+      "Content-Type": "application/json",
+      "X-CSRF-Token": csrfToken,
+    },
     body: JSON.stringify(payload),
   });
 

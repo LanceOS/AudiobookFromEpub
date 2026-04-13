@@ -10,7 +10,7 @@ from pathlib import Path
 # Enable test mode so the app uses the bundled sample WAV instead of Kokoro
 os.environ.setdefault("AUDIOBOOK_TEST_MODE", "1")
 
-from main import app
+from main import DEFAULT_OUTPUT_DIR, app
 
 
 def build_epub_bytes() -> bytes:
@@ -22,10 +22,19 @@ def main() -> None:
     payload = build_epub_bytes()
     client = app.test_client()
 
-    with tempfile.TemporaryDirectory() as output_dir:
+    index_resp = client.get("/")
+    assert index_resp.status_code == 200
+    with client.session_transaction() as sess:
+        csrf_token = sess.get("csrf_token")
+    assert csrf_token, "csrf token missing from session"
+    headers = {"X-CSRF-Token": csrf_token}
+
+    DEFAULT_OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(dir=str(DEFAULT_OUTPUT_DIR)) as output_dir:
         upload_resp = client.post(
             "/api/upload",
             data={"epub": (BytesIO(payload), "smoke.epub")},
+            headers=headers,
             content_type="multipart/form-data",
         )
         assert upload_resp.status_code == 200, upload_resp.json
@@ -40,6 +49,7 @@ def main() -> None:
                 "mode": "single",
                 "voice": "af_heart",
             },
+            headers=headers,
         )
         assert generate_resp.status_code == 200, generate_resp.json
 

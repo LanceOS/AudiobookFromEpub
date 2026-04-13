@@ -403,6 +403,11 @@ def detect_device(preferred: str = "cpu") -> str:
     return pref
 
 
+def default_requested_device() -> str:
+    configured = os.getenv("AUDIOBOOK_DEVICE", "").strip().lower()
+    return configured or "auto"
+
+
 def split_text_into_chunks(text: str, max_chars: int = 700) -> List[str]:
     normalized = re.sub(r"\s+", " ", (text or "").strip())
     if not normalized:
@@ -748,6 +753,7 @@ def run_generation_job(job_id: str) -> None:
         mode = str(job["config"].get("mode", "single"))
         output_name = slugify(str(job["config"].get("output_name", "audiobook")), fallback="audiobook")
         device = detect_device(str(job["config"].get("device", "cpu")))
+        update_job(job_id, device=device)
 
         # Prefer pre-parsed chapters from the upload step to avoid re-parsing
         chapters = job.get("chapters") or []
@@ -974,13 +980,14 @@ def api_generate():
         return jsonify({"error": "Unsupported voice."}), 400
 
     estimated_seconds = estimate_generation_seconds(job, mode)
+    requested_device = default_requested_device()
 
     config = {
         "output_dir": str(output_dir),
         "output_name": output_name,
         "mode": mode,
         "voice": voice,
-        "device": "cpu",
+        "device": requested_device,
     }
 
     update_job(
@@ -1013,6 +1020,10 @@ def api_job_status(job_id: str):
     if not job:
         return jsonify({"error": "Job not found."}), 404
 
+    elapsed_seconds = job.get("elapsed_seconds")
+    if elapsed_seconds is None and job.get("started_at"):
+        elapsed_seconds = calculate_elapsed_seconds(job.get("started_at"), job.get("finished_at"))
+
     return jsonify(
         {
             "id": job["id"],
@@ -1022,8 +1033,9 @@ def api_job_status(job_id: str):
             "error": job["error"],
             "started_at": job.get("started_at"),
             "finished_at": job.get("finished_at"),
-            "elapsed_seconds": job.get("elapsed_seconds"),
+            "elapsed_seconds": elapsed_seconds,
             "estimated_seconds": job.get("estimated_seconds"),
+            "device": job.get("device") or job.get("config", {}).get("device", "auto"),
             "detected_title": job["detected_title"],
             "chapters_count": job["chapters_count"],
             "run_folder": job["run_folder"],

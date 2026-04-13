@@ -94,12 +94,13 @@ function renderJobDetails(statusData) {
   const rows = [
     ["Job", statusData.id],
     ["Detected Chapters", statusData.chapters_count],
+    ["Device", statusData.device || "auto"],
     ["Run Folder", statusData.run_folder || "not created yet"],
-    ["Started", startedAt ? formatDateTime(startedAt) : "waiting to start"],
+    ["Time Started", startedAt ? formatDateTime(startedAt) : "waiting to start"],
     ["Last Updated", formatDateTime(statusData.updated_at)],
     ["Predicted Duration", formatDuration(estimatedSeconds)],
     ["Predicted Finish", predictedFinish ? formatDateTime(predictedFinish) : "waiting to start"],
-    ["Finished", finishedAt ? formatDateTime(finishedAt) : (['completed', 'failed'].includes(statusData.status) ? "not available" : "in progress")],
+    ["Time Ended", finishedAt ? formatDateTime(finishedAt) : (['completed', 'failed'].includes(statusData.status) ? "not available" : "in progress")],
     ["Time Taken", statusData.elapsed_seconds !== null && statusData.elapsed_seconds !== undefined ? formatDuration(statusData.elapsed_seconds) : (startedAt ? "in progress" : "not started")],
   ];
 

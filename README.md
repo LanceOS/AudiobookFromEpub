@@ -21,12 +21,17 @@ Kokoro releases that this project targets require Python `<3.13`.
 Recommended env in this repo:
 
 ```bash
+# Create and activate a dedicated venv for Kokoro (Python 3.12)
+python3.12 -m venv kokoro_venv
 source kokoro_venv/bin/activate
+# Install the lightweight runtime requirements for the web app
 pip install -r requirements.txt
-pip install flask
+# Note: on Python 3.14 the `kokoro` package is skipped by `requirements.txt`.
+# To use Kokoro synthesis, install Kokoro inside the Python 3.12 venv:
+pip install kokoro>=0.9.2
 ```
 
-If you use `.venv` (Python 3.14), the web app still runs but Kokoro synthesis can fail due package/version incompatibility.
+If you use `.venv` (Python 3.14), the web app UI and API will run, but Kokoro synthesis may fail due to package/version incompatibility. Use the `kokoro_venv` shown above for full TTS support.
 
 ## Run
 

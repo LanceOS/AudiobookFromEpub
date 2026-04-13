@@ -9,5 +9,6 @@ lxml
 tqdm
 sentencepiece
 scipy
-kokoro>=0.9.2
+# Kokoro requires Python <3.13 (install in a separate Python 3.12 venv)
+kokoro>=0.9.2; python_version < "3.13"
 flask

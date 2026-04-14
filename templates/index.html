@@ -8,163 +8,133 @@
     <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}" />
   </head>
   <body>
-    <div class="backdrop backdrop-a"></div>
-    <div class="backdrop backdrop-b"></div>
 
-    <main class="app-shell">
-      <header class="hero">
-        <div class="hero-content">
-          <div class="hero-copy">
-            <p class="eyebrow">Professional EPUB conversion</p>
-            <h1>Transform Your Books Into Audiobooks</h1>
-            <p class="hero-description">
-              Convert EPUB files to high-quality WAV audio with intelligent formatting, flexible voice selection, and chapter-by-chapter control.
-            </p>
-          </div>
+    <header class="header">
+      <div class="header-inner">
+        <h1 class="header-title">EPUB to Audiobook</h1>
+        <div class="header-device">
+          <span>Device:</span>
+          <span id="detectedDevice" class="device-chip">{{ detected_device }}</span>
+        </div>
+      </div>
+    </header>
 
-          <div class="hero-device-panel">
-            <p class="device-label">Device</p>
-            <div id="detectedDevice" class="device-badge">{{ detected_device }}</div>
-            <p class="device-note">{{ detected_device_note }}</p>
+    <main class="main">
+      <!-- Left column: controls -->
+      <div class="col-controls">
+
+        <!-- Step 1: Upload -->
+        <div class="card">
+          <h2 class="card-title">1. Choose Your EPUB</h2>
+          <label id="dropZone" for="epubFile" class="drop-zone" tabindex="0" role="button" aria-label="Click or drag an EPUB file here">
+            <svg class="drop-icon" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12"/>
+            </svg>
+            <p class="drop-primary">Click to upload or drag an EPUB here</p>
+            <p class="drop-secondary">Only .epub files are accepted</p>
+            <input id="epubFile" type="file" accept=".epub" />
+          </label>
+          <div class="upload-meta">
+            <div id="detectedTitleField">Title: <strong><span id="detectedTitle">None</span></strong></div>
+            <div id="estimatedFiles">Files: ?</div>
           </div>
         </div>
-      </header>
 
-      <div class="workspace">
-        <section class="panel panel-controls">
-          <div class="panel-header">
-            <h2>Upload & Configure</h2>
-            <p class="panel-subtitle">Set up your conversion parameters</p>
-          </div>
-
+        <!-- Step 2: Settings -->
+        <div class="card">
+          <h2 class="card-title">2. Settings</h2>
           <div class="form-grid">
-            <!-- File Upload Section -->
-            <div class="form-section">
-              <h3 class="section-title">1. Choose Your Book</h3>
-              
-              <div class="field-group field-group-wide">
-                <label for="dropZone" class="field-label">EPUB File</label>
-                <label id="dropZone" for="epubFile" class="drop-zone" tabindex="0" role="button" aria-label="Click or drop an EPUB file">
-                  <svg class="drop-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                    <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
-                    <polyline points="17 8 12 3 7 8"></polyline>
-                    <line x1="12" y1="3" x2="12" y2="15"></line>
-                  </svg>
-                  <p class="drop-primary">Choose file or drag here</p>
-                  <p class="drop-secondary">EPUB format supported</p>
-                  <input id="epubFile" type="file" accept=".epub" class="visually-hidden" />
+            <div>
+              <label class="field-label" for="outputName">Output Name</label>
+              <input id="outputName" type="text" value="audiobook" placeholder="audiobook" />
+            </div>
+            <div>
+              <label class="field-label" for="voiceSelect">Voice</label>
+              <select id="voiceSelect">
+                {% for voice in voices %}
+                <option value="{{ voice }}">{{ voice }}</option>
+                {% endfor %}
+              </select>
+            </div>
+            <div class="form-full">
+              <label class="field-label" for="outputDir">Output Directory</label>
+              <input id="outputDir" type="text" value="{{ default_output_dir }}" />
+            </div>
+            <div class="form-full">
+              <label class="field-label" for="filterLevel">Front Matter Filter</label>
+              <select id="filterLevel">
+                <option value="default" selected>Default — Skip common front/back matter (recommended)</option>
+                <option value="conservative">Conservative — Only remove obvious TOC pages</option>
+                <option value="aggressive">Aggressive — Also skip introductions and notes</option>
+                <option value="off">Off — Include everything as-is</option>
+              </select>
+            </div>
+            <div class="form-full">
+              <label class="field-label">Generation Mode</label>
+              <div class="radio-group">
+                <label class="radio-option">
+                  <input type="radio" name="mode" value="single" checked />
+                  <span>Single File <span class="field-hint">— one continuous audiobook</span></span>
+                </label>
+                <label class="radio-option">
+                  <input type="radio" name="mode" value="chapter" />
+                  <span>By Chapter <span class="field-hint">— separate file per chapter</span></span>
                 </label>
               </div>
-
-              <div class="field-group field-group-wide">
-                <label for="detectedTitleField" class="field-label">Detected Title</label>
-                <div id="detectedTitleField" class="readonly-field">
-                  <span id="detectedTitle">No file uploaded yet</span>
-                </div>
-              </div>
-
-              <div class="field-group field-group-wide">
-                <div id="estimatedFiles" class="field-hint">Estimated output files: Not available</div>
-              </div>
-            </div>
-
-            <!-- Output Settings Section -->
-            <div class="form-section">
-              <h3 class="section-title">2. Output Settings</h3>
-              
-              <div class="field-group field-group-half">
-                <label for="outputName" class="field-label">Output Name</label>
-                <input id="outputName" type="text" placeholder="audiobook" value="audiobook" />
-              </div>
-
-              <div class="field-group field-group-wide">
-                <label for="outputDir" class="field-label">Output Directory</label>
-                <input id="outputDir" type="text" placeholder="/path/to/output" value="{{ default_output_dir }}" />
-              </div>
-
-              <div class="field-group field-group-half">
-                <label for="voiceSelect" class="field-label">Voice</label>
-                <select id="voiceSelect">
-                  {% for voice in voices %}
-                  <option value="{{ voice }}">{{ voice }}</option>
-                  {% endfor %}
-                </select>
-              </div>
-            </div>
-
-            <!-- Filter & Mode Section -->
-            <div class="form-section">
-              <h3 class="section-title">3. Processing Options</h3>
-              
-              <div class="field-group field-group-wide">
-                <label for="filterLevel" class="field-label">Front Matter Filter</label>
-                <select id="filterLevel">
-                  <option value="default" selected>Default — Skip common front/back matter (recommended)</option>
-                  <option value="conservative">Conservative — Only remove obvious TOC pages</option>
-                  <option value="aggressive">Aggressive — Also skip introductions and notes</option>
-                  <option value="off">Off — Include everything as-is</option>
-                </select>
-                <p class="field-hint">Controls how aggressively the system skips non-narrative content.</p>
-              </div>
-
-              <div class="field-group field-group-wide">
-                <label class="field-label">Generation Mode</label>
-                <div class="radio-group">
-                  <label class="radio-option">
-                    <input type="radio" name="mode" value="single" checked />
-                    <div class="radio-content">
-                      <span class="radio-title">Single File</span>
-                      <span class="radio-desc">One continuous audiobook</span>
-                    </div>
-                  </label>
-                  <label class="radio-option">
-                    <input type="radio" name="mode" value="chapter" />
-                    <div class="radio-content">
-                      <span class="radio-title">By Chapter</span>
-                      <span class="radio-desc">Separate file per chapter</span>
-                    </div>
-                  </label>
-                </div>
-              </div>
-            </div>
-
-            <!-- Action Button -->
-            <div class="field-group field-group-wide action-section">
-              <button id="generateButton" class="btn btn-primary" disabled>
-                <span class="btn-text">Generate Audiobook</span>
-                <span class="btn-icon">→</span>
-              </button>
-              <p class="action-note">Each run creates a new timestamped folder</p>
             </div>
           </div>
-        </section>
+        </div>
 
-        <aside class="panel panel-status">
-          <div class="panel-header">
-            <h2>Progress & Status</h2>
+        <!-- Generate -->
+        <button id="generateButton" class="btn-generate" disabled>
+          Generate Audiobook
+        </button>
+
+      </div>
+
+      <!-- Right column: status + files -->
+      <div class="col-status">
+
+        <!-- Status -->
+        <div class="card">
+          <div class="status-header">
+            <h2 class="status-title">Status</h2>
             <span id="statusBadge" class="status-badge idle">Idle</span>
           </div>
-
-          <div class="status-content">
-            <p id="statusMessage" class="status-text" aria-live="polite">Ready to upload an EPUB</p>
-            <progress id="progressBar" value="0" max="100" aria-label="Generation progress"></progress>
-            <div id="jobDetails" class="job-details" aria-live="polite"></div>
+          <p id="statusMessage" class="status-message" aria-live="polite">Ready to upload an EPUB</p>
+          <div class="progress-track">
+            <div id="progressBar" class="progress-fill"></div>
           </div>
-        </aside>
+          <div id="jobDetails" class="job-details" aria-live="polite"></div>
+        </div>
 
-        <section class="panel panel-files panel-wide">
-          <div class="panel-header">
-            <h2>Generated Files</h2>
-            <span class="files-count">Most Recent Output</span>
+        <!-- Files -->
+        <div class="card">
+          <div class="files-header">
+            <h2 class="card-title" style="margin-bottom:0;padding-bottom:0;border-bottom:none;">Generated Files</h2>
           </div>
+          <div class="files-scroll">
+            <ul id="fileList" class="file-list" aria-live="polite">
+              <li class="empty">No files generated yet</li>
+            </ul>
+          </div>
+        </div>
 
-          <ul id="fileList" class="file-list" aria-live="polite">
-            <li class="empty">No files generated yet</li>
-          </ul>
-        </section>
       </div>
     </main>
 
     <script src="{{ url_for('static', filename='js/app.js') }}" defer></script>
+    <script>
+      // app.js calls byId("progressBar").value = N — intercept that on our div
+      const _progressFill = document.getElementById('progressBar');
+      if (_progressFill) {
+        Object.defineProperty(_progressFill, 'value', {
+          set(v) { this.style.width = v + '%'; },
+          get() { return parseFloat(this.style.width) || 0; }
+        });
+      }
+    </script>
+
   </body>
 </html>

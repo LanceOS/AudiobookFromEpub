@@ -5,6 +5,7 @@ const state = {
 
 function byId(id) {
   return document.getElementById(id);
+  chaptersCount: null,
 }
 
 function getCsrfToken() {
@@ -19,8 +20,30 @@ function selectedMode() {
 
 function setBadge(status) {
   const badge = byId("statusBadge");
-  badge.textContent = status;
-  badge.className = `badge ${status}`;
+  badge.textContent = status.charAt(0).toUpperCase() + status.slice(1);
+
+function updateEstimatedFiles() {
+  const el = byId("estimatedFiles");
+  if (!el) return;
+  const mode = selectedMode();
+  const chapters = state.chaptersCount;
+  let text = "Estimated output files: ";
+
+  if (mode === "single") {
+    text += "1 file";
+  } else if (mode === "chapter") {
+    if (chapters === null || chapters === undefined) {
+      text += "unknown — upload an EPUB to detect chapters";
+    } else {
+      text += `${chapters} ${chapters === 1 ? "file" : "files"}`;
+    }
+  } else {
+    text += chapters ? `${chapters} files` : "not available";
+  }
+
+  el.textContent = text;
+}
+  badge.className = `status-badge ${status}`;
 }
 
 function formatBytes(bytes) {
@@ -49,7 +72,10 @@ function formatDuration(seconds) {
   if (seconds === null || seconds === undefined || seconds === "") {
     return "not available";
   }
-
+  // store detected chapters and update the UI estimate
+  state.chaptersCount = payload.chapters_count;
+  byId("statusMessage").textContent = `Upload complete. ${payload.chapters_count} chapters detected.`;
+  updateEstimatedFiles();
   const totalSeconds = Math.max(0, Math.round(Number(seconds)));
   if (Number.isNaN(totalSeconds)) {
     return "not available";
@@ -146,6 +172,13 @@ function renderFiles(files) {
     name.className = "file-item-name";
     name.textContent = entry.name;
 
+  // Update estimated files when user changes generation mode
+  const modeInputs = document.querySelectorAll('input[name="mode"]');
+  modeInputs.forEach((input) => input.addEventListener("change", updateEstimatedFiles));
+
+  // initialize estimate display
+  updateEstimatedFiles();
+
     const meta = document.createElement("span");
     meta.className = "file-item-meta";
     meta.textContent = `${formatBytes(entry.size_bytes)} • ${entry.modified_at}`;
@@ -155,10 +188,6 @@ function renderFiles(files) {
 
     const links = document.createElement("div");
     links.className = "file-links";
-
-    const path = document.createElement("div");
-    path.className = "file-item-meta";
-    path.textContent = entry.path || "";
 
     const play = document.createElement("a");
     play.href = entry.url;
@@ -173,7 +202,6 @@ function renderFiles(files) {
     links.appendChild(download);
 
     item.appendChild(top);
-    item.appendChild(path);
     item.appendChild(links);
 
     list.appendChild(item);
@@ -321,14 +349,23 @@ async function generateAudio() {
 
 function bindEvents() {
   const dropZone = byId("dropZone");
-  const browseButton = byId("browseButton");
   const fileInput = byId("epubFile");
   const generateButton = byId("generateButton");
 
-  browseButton.addEventListener("click", () => {
+  // Make drop zone clickable to open file browser
+  dropZone.addEventListener("click", () => {
     fileInput.click();
   });
 
+  // Keyboard support for accessibility
+  dropZone.addEventListener("keydown", (event) => {
+    if (event.key === "Enter" || event.key === " ") {
+      event.preventDefault();
+      fileInput.click();
+    }
+  });
+
+  // Drag and drop support
   dropZone.addEventListener("dragover", (event) => {
     event.preventDefault();
     dropZone.classList.add("drag-over");
@@ -345,11 +382,13 @@ function bindEvents() {
     await handleEpubSelection(file);
   });
 
+  // File input change event
   fileInput.addEventListener("change", async (event) => {
     const file = event.target.files && event.target.files[0];
     await handleEpubSelection(file);
   });
 
+  // Generate button
   generateButton.addEventListener("click", async () => {
     generateButton.disabled = true;
     try {

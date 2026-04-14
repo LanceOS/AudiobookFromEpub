@@ -1,65 +1,73 @@
 const state = {
   jobId: null,
   pollTimer: null,
-};
+    const dropZone = byId("dropZone");
+    const fileInput = byId("epubFile");
+    const generateButton = byId("generateButton");
 
-function byId(id) {
-  return document.getElementById(id);
-  chaptersCount: null,
-}
-
-function getCsrfToken() {
-  const meta = document.querySelector('meta[name="csrf-token"]');
-  return meta ? meta.getAttribute("content") || "" : "";
-}
-
-function selectedMode() {
-  const option = document.querySelector('input[name="mode"]:checked');
-  return option ? option.value : "single";
-}
-
-function setBadge(status) {
-  const badge = byId("statusBadge");
-  badge.textContent = status.charAt(0).toUpperCase() + status.slice(1);
-
-function updateEstimatedFiles() {
-  const el = byId("estimatedFiles");
-  if (!el) return;
-  const mode = selectedMode();
-  const chapters = state.chaptersCount;
-  let text = "Estimated output files: ";
-
-  if (mode === "single") {
-    text += "1 file";
-  } else if (mode === "chapter") {
-    if (chapters === null || chapters === undefined) {
-      text += "unknown — upload an EPUB to detect chapters";
-    } else {
-      text += `${chapters} ${chapters === 1 ? "file" : "files"}`;
+    // Safety: if the file input is missing, there's nothing to do
+    if (!fileInput) {
+      console.warn("`epubFile` input not found - file selection disabled");
+      return;
     }
-  } else {
-    text += chapters ? `${chapters} files` : "not available";
-  }
 
-  el.textContent = text;
-}
-  badge.className = `status-badge ${status}`;
-}
+    // Make drop zone clickable to open file browser (only if present)
+    if (dropZone) {
+      dropZone.addEventListener("click", () => fileInput.click());
 
-function formatBytes(bytes) {
-  if (!bytes) return "0 B";
-  const units = ["B", "KB", "MB", "GB"];
-  const power = Math.min(Math.floor(Math.log(bytes) / Math.log(1024)), units.length - 1);
-  const value = bytes / Math.pow(1024, power);
-  return `${value.toFixed(value >= 10 ? 0 : 1)} ${units[power]}`;
-}
+      // Keyboard support for accessibility
+      dropZone.addEventListener("keydown", (event) => {
+        if (event.key === "Enter" || event.key === " ") {
+          event.preventDefault();
+          fileInput.click();
+        }
+      });
 
-function formatDateTime(value) {
-  if (!value) return "not available";
+      // Drag and drop support
+      dropZone.addEventListener("dragover", (event) => {
+        event.preventDefault();
+        dropZone.classList.add("drag-over");
+      });
 
-  const parsed = value instanceof Date ? value : new Date(value);
-  if (Number.isNaN(parsed.getTime())) {
-    return String(value);
+      dropZone.addEventListener("dragleave", () => {
+        dropZone.classList.remove("drag-over");
+      });
+
+      dropZone.addEventListener("drop", async (event) => {
+        event.preventDefault();
+        dropZone.classList.remove("drag-over");
+        const file = event.dataTransfer && event.dataTransfer.files && event.dataTransfer.files[0];
+        await handleEpubSelection(file);
+      });
+    }
+
+    // File input change event (always attach)
+    fileInput.addEventListener("change", async (event) => {
+      const file = event.target.files && event.target.files[0];
+      await handleEpubSelection(file);
+    });
+
+    // Generate button (optional)
+    if (generateButton) {
+      generateButton.addEventListener("click", async () => {
+        generateButton.disabled = true;
+        try {
+          await generateAudio();
+        } catch (error) {
+          byId("statusMessage").textContent = error.message;
+          setBadge("failed");
+        } finally {
+          generateButton.disabled = false;
+        }
+      });
+    }
+
+    // Update estimated files when user changes generation mode
+    const modeInputs = document.querySelectorAll('input[name="mode"]');
+    modeInputs.forEach((input) => input.addEventListener("change", updateEstimatedFiles));
+
+    // initialize estimate display
+    updateEstimatedFiles();
   }
 
   return new Intl.DateTimeFormat(undefined, {

@@ -1,73 +1,63 @@
 const state = {
   jobId: null,
   pollTimer: null,
-    const dropZone = byId("dropZone");
-    const fileInput = byId("epubFile");
-    const generateButton = byId("generateButton");
+  chaptersCount: null,
+};
 
-    // Safety: if the file input is missing, there's nothing to do
-    if (!fileInput) {
-      console.warn("`epubFile` input not found - file selection disabled");
-      return;
-    }
+function byId(id) {
+  return document.getElementById(id);
+}
 
-    // Make drop zone clickable to open file browser (only if present)
-    if (dropZone) {
-      dropZone.addEventListener("click", () => fileInput.click());
+function getCsrfToken() {
+  const meta = document.querySelector('meta[name="csrf-token"]');
+  return meta ? meta.getAttribute("content") || "" : "";
+}
 
-      // Keyboard support for accessibility
-      dropZone.addEventListener("keydown", (event) => {
-        if (event.key === "Enter" || event.key === " ") {
-          event.preventDefault();
-          fileInput.click();
-        }
-      });
+function selectedMode() {
+  const option = document.querySelector('input[name="mode"]:checked');
+  return option ? option.value : "single";
+}
 
-      // Drag and drop support
-      dropZone.addEventListener("dragover", (event) => {
-        event.preventDefault();
-        dropZone.classList.add("drag-over");
-      });
+function updateEstimatedFiles() {
+  const output = byId("estimatedFiles");
+  if (!output) return;
 
-      dropZone.addEventListener("dragleave", () => {
-        dropZone.classList.remove("drag-over");
-      });
+  const mode = selectedMode();
+  if (mode === "single") {
+    output.textContent = "Estimated output files: 1 file";
+    return;
+  }
 
-      dropZone.addEventListener("drop", async (event) => {
-        event.preventDefault();
-        dropZone.classList.remove("drag-over");
-        const file = event.dataTransfer && event.dataTransfer.files && event.dataTransfer.files[0];
-        await handleEpubSelection(file);
-      });
-    }
+  if (state.chaptersCount === null || state.chaptersCount === undefined) {
+    output.textContent = "Estimated output files: unknown - upload an EPUB to detect chapters";
+    return;
+  }
 
-    // File input change event (always attach)
-    fileInput.addEventListener("change", async (event) => {
-      const file = event.target.files && event.target.files[0];
-      await handleEpubSelection(file);
-    });
+  output.textContent = `Estimated output files: ${state.chaptersCount} ${state.chaptersCount === 1 ? "file" : "files"}`;
+}
 
-    // Generate button (optional)
-    if (generateButton) {
-      generateButton.addEventListener("click", async () => {
-        generateButton.disabled = true;
-        try {
-          await generateAudio();
-        } catch (error) {
-          byId("statusMessage").textContent = error.message;
-          setBadge("failed");
-        } finally {
-          generateButton.disabled = false;
-        }
-      });
-    }
+function setBadge(status) {
+  const safeStatus = status || "idle";
+  const badge = byId("statusBadge");
+  if (!badge) return;
+  badge.textContent = safeStatus.charAt(0).toUpperCase() + safeStatus.slice(1);
+  badge.className = `status-badge ${safeStatus}`;
+}
 
-    // Update estimated files when user changes generation mode
-    const modeInputs = document.querySelectorAll('input[name="mode"]');
-    modeInputs.forEach((input) => input.addEventListener("change", updateEstimatedFiles));
+function formatBytes(bytes) {
+  if (!bytes) return "0 B";
+  const units = ["B", "KB", "MB", "GB"];
+  const power = Math.min(Math.floor(Math.log(bytes) / Math.log(1024)), units.length - 1);
+  const value = bytes / Math.pow(1024, power);
+  return `${value.toFixed(value >= 10 ? 0 : 1)} ${units[power]}`;
+}
 
-    // initialize estimate display
-    updateEstimatedFiles();
+function formatDateTime(value) {
+  if (!value) return "not available";
+
+  const parsed = value instanceof Date ? value : new Date(value);
+  if (Number.isNaN(parsed.getTime())) {
+    return String(value);
   }
 
   return new Intl.DateTimeFormat(undefined, {
@@ -80,10 +70,7 @@ function formatDuration(seconds) {
   if (seconds === null || seconds === undefined || seconds === "") {
     return "not available";
   }
-  // store detected chapters and update the UI estimate
-  state.chaptersCount = payload.chapters_count;
-  byId("statusMessage").textContent = `Upload complete. ${payload.chapters_count} chapters detected.`;
-  updateEstimatedFiles();
+
   const totalSeconds = Math.max(0, Math.round(Number(seconds)));
   if (Number.isNaN(totalSeconds)) {
     return "not available";
@@ -115,6 +102,8 @@ function addSeconds(isoValue, seconds) {
 
 function renderJobDetails(statusData) {
   const container = byId("jobDetails");
+  if (!container) return;
+
   container.innerHTML = "";
 
   const grid = document.createElement("div");
@@ -134,7 +123,7 @@ function renderJobDetails(statusData) {
     ["Last Updated", formatDateTime(statusData.updated_at)],
     ["Predicted Duration", formatDuration(estimatedSeconds)],
     ["Predicted Finish", predictedFinish ? formatDateTime(predictedFinish) : "waiting to start"],
-    ["Time Ended", finishedAt ? formatDateTime(finishedAt) : (['completed', 'failed'].includes(statusData.status) ? "not available" : "in progress")],
+    ["Time Ended", finishedAt ? formatDateTime(finishedAt) : (["completed", "failed"].includes(statusData.status) ? "not available" : "in progress")],
     ["Time Taken", statusData.elapsed_seconds !== null && statusData.elapsed_seconds !== undefined ? formatDuration(statusData.elapsed_seconds) : (startedAt ? "in progress" : "not started")],
   ];
 
@@ -160,6 +149,8 @@ function renderJobDetails(statusData) {
 
 function renderFiles(files) {
   const list = byId("fileList");
+  if (!list) return;
+
   list.innerHTML = "";
 
   if (!files.length) {
@@ -180,16 +171,9 @@ function renderFiles(files) {
     name.className = "file-item-name";
     name.textContent = entry.name;
 
-  // Update estimated files when user changes generation mode
-  const modeInputs = document.querySelectorAll('input[name="mode"]');
-  modeInputs.forEach((input) => input.addEventListener("change", updateEstimatedFiles));
-
-  // initialize estimate display
-  updateEstimatedFiles();
-
     const meta = document.createElement("span");
     meta.className = "file-item-meta";
-    meta.textContent = `${formatBytes(entry.size_bytes)} • ${entry.modified_at}`;
+    meta.textContent = `${formatBytes(entry.size_bytes)} • ${formatDateTime(entry.modified_at)}`;
 
     top.appendChild(name);
     top.appendChild(meta);
@@ -232,12 +216,16 @@ async function refreshJob() {
       throw new Error(statusData.error || "Status check failed");
     }
 
+    if (statusData.chapters_count !== null && statusData.chapters_count !== undefined) {
+      state.chaptersCount = statusData.chapters_count;
+      updateEstimatedFiles();
+    }
+
     setBadge(statusData.status || "idle");
     byId("progressBar").value = statusData.progress || 0;
     byId("statusMessage").textContent = statusData.error || statusData.message || "";
 
     renderJobDetails(statusData);
-
     renderFiles(filesData.files || []);
 
     if (["completed", "failed"].includes(statusData.status)) {
@@ -267,7 +255,6 @@ async function uploadEpubFile(file) {
   const formData = new FormData();
   formData.append("epub", file);
 
-  // Include user-selected filter level for front/back matter
   const filterEl = byId("filterLevel");
   const filterVal = filterEl ? filterEl.value : "default";
   formData.append("filter_level", filterVal);
@@ -289,13 +276,20 @@ async function uploadEpubFile(file) {
   }
 
   state.jobId = payload.job_id;
+  state.chaptersCount = payload.chapters_count;
+
   byId("detectedTitle").textContent = payload.detected_title;
   byId("outputName").value = payload.suggested_name;
   byId("statusMessage").textContent = `Upload complete. ${payload.chapters_count} chapters detected.`;
-  byId("generateButton").disabled = false;
+
+  const generateButton = byId("generateButton");
+  if (generateButton) {
+    generateButton.disabled = false;
+  }
 
   setBadge("uploaded");
   byId("progressBar").value = 0;
+  updateEstimatedFiles();
 
   return payload;
 }
@@ -314,7 +308,10 @@ async function handleEpubSelection(file) {
   } catch (error) {
     byId("statusMessage").textContent = error.message;
     setBadge("failed");
-    byId("generateButton").disabled = true;
+    const generateButton = byId("generateButton");
+    if (generateButton) {
+      generateButton.disabled = true;
+    }
   }
 }
 
@@ -360,54 +357,59 @@ function bindEvents() {
   const fileInput = byId("epubFile");
   const generateButton = byId("generateButton");
 
-  // Make drop zone clickable to open file browser
-  dropZone.addEventListener("click", () => {
-    fileInput.click();
-  });
+  if (!fileInput) {
+    console.warn("`epubFile` input not found - file selection disabled");
+    return;
+  }
 
-  // Keyboard support for accessibility
-  dropZone.addEventListener("keydown", (event) => {
-    if (event.key === "Enter" || event.key === " ") {
+  if (dropZone) {
+    dropZone.addEventListener("keydown", (event) => {
+      if (event.key === "Enter" || event.key === " ") {
+        event.preventDefault();
+        fileInput.click();
+      }
+    });
+
+    dropZone.addEventListener("dragover", (event) => {
       event.preventDefault();
-      fileInput.click();
-    }
-  });
+      dropZone.classList.add("drag-over");
+    });
 
-  // Drag and drop support
-  dropZone.addEventListener("dragover", (event) => {
-    event.preventDefault();
-    dropZone.classList.add("drag-over");
-  });
+    dropZone.addEventListener("dragleave", () => {
+      dropZone.classList.remove("drag-over");
+    });
 
-  dropZone.addEventListener("dragleave", () => {
-    dropZone.classList.remove("drag-over");
-  });
+    dropZone.addEventListener("drop", async (event) => {
+      event.preventDefault();
+      dropZone.classList.remove("drag-over");
+      const file = event.dataTransfer && event.dataTransfer.files && event.dataTransfer.files[0];
+      await handleEpubSelection(file);
+    });
+  }
 
-  dropZone.addEventListener("drop", async (event) => {
-    event.preventDefault();
-    dropZone.classList.remove("drag-over");
-    const file = event.dataTransfer && event.dataTransfer.files && event.dataTransfer.files[0];
-    await handleEpubSelection(file);
-  });
-
-  // File input change event
   fileInput.addEventListener("change", async (event) => {
     const file = event.target.files && event.target.files[0];
     await handleEpubSelection(file);
   });
 
-  // Generate button
-  generateButton.addEventListener("click", async () => {
-    generateButton.disabled = true;
-    try {
-      await generateAudio();
-    } catch (error) {
-      byId("statusMessage").textContent = error.message;
-      setBadge("failed");
-    } finally {
-      generateButton.disabled = false;
-    }
-  });
+  if (generateButton) {
+    generateButton.addEventListener("click", async () => {
+      generateButton.disabled = true;
+      try {
+        await generateAudio();
+      } catch (error) {
+        byId("statusMessage").textContent = error.message;
+        setBadge("failed");
+      } finally {
+        generateButton.disabled = false;
+      }
+    });
+  }
+
+  const modeInputs = document.querySelectorAll('input[name="mode"]');
+  modeInputs.forEach((input) => input.addEventListener("change", updateEstimatedFiles));
+
+  updateEstimatedFiles();
 }
 
 window.addEventListener("beforeunload", stopPolling);

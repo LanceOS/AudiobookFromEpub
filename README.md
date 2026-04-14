@@ -108,3 +108,14 @@ Validate compose configuration:
 ```bash
 docker compose config
 ```
+
+## UI Redesign (2026-04-13)
+
+The repository's web UI received a ShadCN-inspired redesign on 2026-04-13. Key notes:
+
+- The UI no longer relies on the Tailwind CDN; a self-contained stylesheet now lives at `static/css/style.css`.
+- The main template was simplified and clarified in `templates/index.html` for better hierarchy and accessibility.
+- Visual improvements: refined typography, status badges, a gradient primary button, and a smooth progress bar.
+
+If you need to revert or inspect the UI changes, check the recent commits (for example `c41e10b`).
+

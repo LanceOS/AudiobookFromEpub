@@ -3,16 +3,26 @@
 
 from __future__ import annotations
 
+import argparse
 import os
+import sys
 import tempfile
+import time
 import unittest
 import zipfile
 from pathlib import Path
 from unittest import mock
 
+import numpy as np
+
+import main as app_main
+
 from main import (  # type: ignore[reportMissingImports]
+    _normalize_filter_level,
+    _should_skip_chapter,
     app,
     calculate_elapsed_seconds,
+    choose_voice_reference,
     cleanup_interval_seconds,
     cleanup_max_age_seconds,
     create_run_folder,
@@ -23,13 +33,17 @@ from main import (  # type: ignore[reportMissingImports]
     is_test_mode,
     is_valid_job_id,
     iso_to_epoch,
+    is_lfs_pointer,
     looks_like_valid_epub,
+    maybe_cleanup_stale_data,
     rate_limit_bucket_for_request,
+    synthesize_text_to_wav,
     should_enable_cleanup,
     slugify,
     split_text_into_chunks,
     validate_output_directory,
     voice_to_lang_code,
+    extract_book_title,
 )
 
 
@@ -117,6 +131,27 @@ class HelperFunctionTests(unittest.TestCase):
             self.assertTrue(looks_like_valid_epub(valid_epub))
             self.assertFalse(looks_like_valid_epub(invalid_epub))
 
+    def test_extract_book_title_reads_metadata(self) -> None:
+        from ebooklib import epub  # type: ignore[reportMissingImports]
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            epub_path = Path(temp_dir) / "title-test.epub"
+
+            book = epub.EpubBook()
+            book.set_identifier("title-test")
+            book.set_title("Metadata Title")
+            book.set_language("en")
+            chapter = epub.EpubHtml(title="Chapter 1", file_name="chap1.xhtml", lang="en")
+            chapter.content = "<html><body><h1>Chapter 1</h1><p>Text.</p></body></html>"
+            book.add_item(chapter)
+            book.toc = (chapter,)
+            book.spine = ["nav", chapter]
+            book.add_item(epub.EpubNcx())
+            book.add_item(epub.EpubNav())
+            epub.write_epub(str(epub_path), book)
+
+            self.assertEqual(extract_book_title(epub_path), "Metadata Title")
+
     def test_rate_limit_bucket_mapping(self) -> None:
         with app.test_request_context("/api/upload"):
             bucket, limit, window = rate_limit_bucket_for_request()
@@ -135,6 +170,75 @@ class HelperFunctionTests(unittest.TestCase):
         with app.test_request_context("/not-an-api"):
             bucket, _, _ = rate_limit_bucket_for_request()
             self.assertIsNone(bucket)
+
+    def test_normalize_filter_level_defaults_unknown_values(self) -> None:
+        self.assertEqual(_normalize_filter_level("DEFAULT"), "default")
+        self.assertEqual(_normalize_filter_level("unknown"), "default")
+
+    def test_should_skip_chapter_respects_off_level(self) -> None:
+        self.assertFalse(
+            _should_skip_chapter(
+                chapter_title="Table of Contents",
+                text="contents contents contents",
+                level="off",
+            )
+        )
+
+    def test_choose_voice_reference_returns_voice_when_local_file_missing(self) -> None:
+        self.assertEqual(choose_voice_reference("af_heart"), "af_heart")
+
+    def test_is_lfs_pointer_detection(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            pointer_file = Path(temp_dir) / "pointer.txt"
+            regular_file = Path(temp_dir) / "regular.txt"
+            pointer_file.write_text("version https://git-lfs.github.com/spec/v1\noid sha256:abc\n", encoding="utf-8")
+            regular_file.write_text("regular file", encoding="utf-8")
+
+            self.assertTrue(is_lfs_pointer(pointer_file))
+            self.assertFalse(is_lfs_pointer(regular_file))
+
+    def test_cleanup_removes_stale_entries_only(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_root:
+            uploads_dir = Path(temp_root) / "uploads"
+            jobs_dir = Path(temp_root) / "jobs"
+            uploads_dir.mkdir(parents=True, exist_ok=True)
+            jobs_dir.mkdir(parents=True, exist_ok=True)
+
+            stale_upload = uploads_dir / "stale"
+            fresh_upload = uploads_dir / "fresh"
+            stale_upload.mkdir()
+            fresh_upload.mkdir()
+
+            stale_meta = jobs_dir / "stale.json"
+            fresh_meta = jobs_dir / "fresh.json"
+            stale_meta.write_text("{}", encoding="utf-8")
+            fresh_meta.write_text("{}", encoding="utf-8")
+
+            stale_time = time.time() - (2 * 3600)
+            now_time = time.time()
+
+            os.utime(stale_upload, (stale_time, stale_time))
+            os.utime(fresh_upload, (now_time, now_time))
+            os.utime(stale_meta, (stale_time, stale_time))
+            os.utime(fresh_meta, (now_time, now_time))
+
+            with mock.patch.object(app_main, "UPLOADS_DIR", uploads_dir), mock.patch.object(app_main, "JOB_META_DIR", jobs_dir):
+                app_main.CLEANUP_LAST_RUN = 0.0
+                with mock.patch.dict(
+                    os.environ,
+                    {
+                        "AUDIOBOOK_ENABLE_CLEANUP": "1",
+                        "AUDIOBOOK_CLEANUP_AGE_HOURS": "1",
+                        "AUDIOBOOK_CLEANUP_INTERVAL_SECONDS": "60",
+                    },
+                    clear=False,
+                ):
+                    maybe_cleanup_stale_data()
+
+            self.assertFalse(stale_upload.exists())
+            self.assertTrue(fresh_upload.exists())
+            self.assertFalse(stale_meta.exists())
+            self.assertTrue(fresh_meta.exists())
 
     def test_cleanup_configuration_parsing(self) -> None:
         with mock.patch.dict(os.environ, {"AUDIOBOOK_CLEANUP_AGE_HOURS": "2"}, clear=False):
@@ -166,6 +270,47 @@ class HelperFunctionTests(unittest.TestCase):
     def test_detect_device_auto_returns_known_value(self) -> None:
         self.assertIn(detect_device("auto"), {"cpu", "cuda"})
 
+    def test_pipeline_bundle_caches_pipeline_by_voice_and_device(self) -> None:
+        class FakePipeline:
+            init_calls = 0
+
+            def __init__(self, *args, **kwargs):
+                FakePipeline.init_calls += 1
+
+        with app_main.PIPELINE_LOCK:
+            app_main.PIPELINE_CACHE.clear()
+
+        with mock.patch.object(app_main, "HAS_KOKORO", True), mock.patch.object(app_main, "KPipeline", FakePipeline), mock.patch.object(app_main, "KModel", None):
+            first = app_main.get_pipeline_bundle("af_heart", "cpu")
+            second = app_main.get_pipeline_bundle("af_heart", "cpu")
+
+        self.assertIs(first, second)
+        self.assertEqual(FakePipeline.init_calls, 1)
+
+    def test_synthesize_text_to_wav_writes_audio_using_pipeline_output(self) -> None:
+        class FakePipeline:
+            def __call__(self, chunk, voice=None):
+                return iter([(None, None, np.array([0.1, -0.1], dtype=np.float32))])
+
+        write_mock = mock.Mock()
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            output_path = Path(temp_dir) / "out.wav"
+
+            with mock.patch.object(app_main, "split_text_into_chunks", return_value=["chunk"]), mock.patch.object(
+                app_main,
+                "get_pipeline_bundle",
+                return_value={"pipeline": FakePipeline(), "model": None},
+            ), mock.patch.object(app_main, "choose_voice_reference", return_value="af_heart"), mock.patch.dict(
+                sys.modules,
+                {"soundfile": mock.Mock(write=write_mock)},
+            ):
+                synthesize_text_to_wav("text", voice="af_heart", output_path=output_path, device="cpu")
+
+        self.assertTrue(write_mock.called)
+        self.assertEqual(write_mock.call_args.args[0], str(output_path))
+        self.assertEqual(write_mock.call_args.args[2], 24000)
+
     def test_voice_to_lang_code_parsing(self) -> None:
         self.assertEqual(voice_to_lang_code("af_heart"), "a")
         self.assertEqual(voice_to_lang_code("voicewithoutunderscore"), "a")
@@ -189,6 +334,30 @@ class HelperFunctionTests(unittest.TestCase):
 
         self.assertGreaterEqual(single, 15)
         self.assertGreater(chapter, single)
+
+    def test_parse_args_honors_cli_values(self) -> None:
+        with mock.patch.object(sys, "argv", ["main.py", "--host", "0.0.0.0", "--port", "8123", "--debug"]):
+            args = app_main.parse_args()
+
+        self.assertEqual(args.host, "0.0.0.0")
+        self.assertEqual(args.port, 8123)
+        self.assertTrue(args.debug)
+
+    def test_main_refuses_debug_without_allow_override(self) -> None:
+        args = argparse.Namespace(host="127.0.0.1", port=5000, debug=True)
+
+        with mock.patch.object(app_main, "parse_args", return_value=args), mock.patch.object(
+            app_main,
+            "ensure_app_dirs",
+        ), mock.patch.object(app_main.app, "run") as run_mock, mock.patch.dict(
+            os.environ,
+            {"AUDIOBOOK_ALLOW_DEBUG": "0"},
+            clear=False,
+        ):
+            with self.assertRaises(SystemExit):
+                app_main.main()
+
+        run_mock.assert_not_called()
 
 
 if __name__ == "__main__":

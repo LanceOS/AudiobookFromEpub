@@ -80,6 +80,8 @@ VOICE_OPTIONS = [
 
 JOBS: Dict[str, Dict] = {}
 JOBS_LOCK = threading.Lock()
+WORKERS: Dict[str, threading.Thread] = {}
+WORKERS_LOCK = threading.Lock()
 PIPELINE_CACHE: Dict[str, Dict] = {}
 PIPELINE_LOCK = threading.Lock()
 RATE_LIMITS = {
@@ -91,6 +93,11 @@ RATE_LIMIT_STATE: Dict[str, List[float]] = {}
 RATE_LIMIT_LOCK = threading.Lock()
 CLEANUP_LOCK = threading.Lock()
 CLEANUP_LAST_RUN = 0.0
+ACTIVE_JOB_STATUSES = {"queued", "running", "stopping"}
+
+
+class JobStopped(Exception):
+    pass
 
 
 def max_upload_bytes_from_env() -> int:
@@ -905,6 +912,123 @@ def update_job(job_id: str, **fields: object) -> None:
     save_job_snapshot(job_id)
 
 
+def register_worker(job_id: str, worker: threading.Thread) -> None:
+    with WORKERS_LOCK:
+        WORKERS[job_id] = worker
+
+
+def unregister_worker(job_id: str, worker: Optional[threading.Thread] = None) -> None:
+    with WORKERS_LOCK:
+        current = WORKERS.get(job_id)
+        if current is None:
+            return
+        if worker is not None and current is not worker:
+            return
+        WORKERS.pop(job_id, None)
+
+
+def is_job_active(job_id: str, job: Optional[Dict] = None) -> bool:
+    current_job = job or get_job(job_id)
+
+    with WORKERS_LOCK:
+        worker = WORKERS.get(job_id)
+        if worker is None:
+            return False
+
+        if worker.is_alive():
+            return True
+
+        if current_job and current_job.get("status") in ACTIVE_JOB_STATUSES:
+            return True
+
+        WORKERS.pop(job_id, None)
+        return False
+
+
+def job_has_generated_output(job: Dict) -> bool:
+    if job.get("generated_files"):
+        return True
+
+    run_folder = str(job.get("run_folder") or "").strip()
+    if not run_folder:
+        return False
+
+    run_path = Path(run_folder)
+    return run_path.exists() and any(run_path.glob("*.wav"))
+
+
+def job_files_cleared(job: Dict) -> bool:
+    return bool(job.get("status") == "stopped" and job.get("stop_requested") and not job_has_generated_output(job))
+
+
+def can_clear_job_files(job: Dict) -> bool:
+    return bool(job.get("status") == "stopped" and not is_job_active(job["id"], job) and job_has_generated_output(job))
+
+
+def serialize_job_status(job: Dict) -> Dict:
+    elapsed_seconds = job.get("elapsed_seconds")
+    if elapsed_seconds is None and job.get("started_at"):
+        elapsed_seconds = calculate_elapsed_seconds(job.get("started_at"), job.get("finished_at"))
+
+    active = is_job_active(job["id"], job)
+
+    return {
+        "id": job["id"],
+        "status": job["status"],
+        "progress": job["progress"],
+        "message": job["message"],
+        "error": job["error"],
+        "started_at": job.get("started_at"),
+        "finished_at": job.get("finished_at"),
+        "elapsed_seconds": elapsed_seconds,
+        "estimated_seconds": job.get("estimated_seconds"),
+        "device": job.get("device") or job.get("config", {}).get("device", "auto"),
+        "detected_title": job["detected_title"],
+        "chapters_count": job["chapters_count"],
+        "run_folder": job["run_folder"],
+        "updated_at": job["updated_at"],
+        "stop_requested": bool(job.get("stop_requested")),
+        "stop_requested_at": job.get("stop_requested_at"),
+        "active": active,
+        "can_stop": bool(job.get("status") in ACTIVE_JOB_STATUSES and active and not job.get("stop_requested")),
+        "can_clear_files": can_clear_job_files(job),
+        "files_cleared": job_files_cleared(job),
+    }
+
+
+def finalize_stopped_job(job_id: str, started_at: Optional[str], generated_files: List[str]) -> None:
+    job = get_job(job_id)
+    if not job:
+        return
+
+    files = list_generated_files(job)
+    final_files = [entry["name"] for entry in files] or list(generated_files)
+    progress = int(job.get("progress") or 0)
+    message = "Generation stopped."
+    if final_files:
+        message = f"Generation stopped. Kept {len(final_files)} generated file(s)."
+
+    update_job(
+        job_id,
+        status="stopped",
+        progress=min(100, max(progress, 0)),
+        message=message,
+        error=None,
+        finished_at=now_iso(),
+        elapsed_seconds=calculate_elapsed_seconds(started_at or job.get("started_at")),
+        generated_files=final_files,
+    )
+
+
+def raise_if_stop_requested(job_id: str, started_at: Optional[str], generated_files: List[str]) -> None:
+    job = get_job(job_id)
+    if not job or not job.get("stop_requested"):
+        return
+
+    finalize_stopped_job(job_id, started_at, generated_files)
+    raise JobStopped()
+
+
 def list_generated_files(job: Dict) -> List[Dict]:
     run_folder = job.get("run_folder")
     if not run_folder:
@@ -937,13 +1061,16 @@ def run_generation_job(job_id: str) -> None:
         return
 
     started_at = now_iso()
+    generated_files: List[str] = []
 
     try:
         update_job(job_id, status="running", progress=5, message="Preparing generation job...", started_at=started_at)
+        raise_if_stop_requested(job_id, started_at, generated_files)
 
         output_dir = Path(job["config"]["output_dir"])
         run_folder = create_run_folder(output_dir, job["config"]["output_name"])
         update_job(job_id, run_folder=str(run_folder), progress=15, message="Run folder created.")
+        raise_if_stop_requested(job_id, started_at, generated_files)
 
         upload_path = Path(job["upload_path"])
         voice = str(job["config"].get("voice", "af_heart"))
@@ -958,8 +1085,7 @@ def run_generation_job(job_id: str) -> None:
             chapters = extract_chapters_from_epub(upload_path)
         total_chapters = len(chapters)
         update_job(job_id, progress=25, message=f"Loaded {total_chapters} chapters from EPUB.")
-
-        generated_files: List[str] = []
+        raise_if_stop_requested(job_id, started_at, generated_files)
 
         # Test-mode shortcut: copy a small bundled WAV instead of running Kokoro
         if is_test_mode():
@@ -970,19 +1096,24 @@ def run_generation_job(job_id: str) -> None:
             update_job(job_id, progress=35, message="Test mode: preparing sample audio files...")
 
             if mode == "single":
+                raise_if_stop_requested(job_id, started_at, generated_files)
                 out_path = run_folder / f"{output_name}.wav"
                 shutil.copyfile(str(sample), str(out_path))
                 generated_files.append(out_path.name)
+                raise_if_stop_requested(job_id, started_at, generated_files)
                 update_job(job_id, progress=95, message="Test-mode single file ready.")
             else:
                 for idx, chapter in enumerate(chapters, start=1):
+                    raise_if_stop_requested(job_id, started_at, generated_files)
                     chapter_slug = slugify(chapter["title"], fallback=f"chapter_{idx:03d}")
                     out_path = run_folder / f"{idx:03d}_{chapter_slug}.wav"
                     shutil.copyfile(str(sample), str(out_path))
                     generated_files.append(out_path.name)
+                    raise_if_stop_requested(job_id, started_at, generated_files)
                     prog = int(40 + idx / max(1, total_chapters) * 50)
                     update_job(job_id, progress=prog, message=f"Test-mode chapter {idx}/{total_chapters} ready.")
 
+            raise_if_stop_requested(job_id, started_at, generated_files)
             update_job(
                 job_id,
                 status="completed",
@@ -996,14 +1127,17 @@ def run_generation_job(job_id: str) -> None:
             return
 
         if mode == "single":
+            raise_if_stop_requested(job_id, started_at, generated_files)
             combined_text = "\n\n".join(ch["text"] for ch in chapters)
             out_path = run_folder / f"{output_name}.wav"
             update_job(job_id, progress=45, message="Generating single audiobook file...")
             synthesize_text_to_wav(combined_text, voice=voice, output_path=out_path, device=device)
             generated_files.append(out_path.name)
+            raise_if_stop_requested(job_id, started_at, generated_files)
             update_job(job_id, progress=95, message="Single file generation complete.")
         else:
             for idx, chapter in enumerate(chapters, start=1):
+                raise_if_stop_requested(job_id, started_at, generated_files)
                 chapter_slug = slugify(chapter["title"], fallback=f"chapter_{idx:03d}")
                 out_path = run_folder / f"{idx:03d}_{chapter_slug}.wav"
                 progress_start = int(30 + (idx - 1) / total_chapters * 60)
@@ -1014,7 +1148,9 @@ def run_generation_job(job_id: str) -> None:
                 )
                 synthesize_text_to_wav(chapter["text"], voice=voice, output_path=out_path, device=device)
                 generated_files.append(out_path.name)
+                raise_if_stop_requested(job_id, started_at, generated_files)
 
+        raise_if_stop_requested(job_id, started_at, generated_files)
         update_job(
             job_id,
             status="completed",
@@ -1025,6 +1161,8 @@ def run_generation_job(job_id: str) -> None:
             finished_at=now_iso(),
             elapsed_seconds=calculate_elapsed_seconds(started_at),
         )
+    except JobStopped:
+        return
     except Exception as exc:
         logging.exception("Generation job failed: %s", exc)
         update_job(
@@ -1036,6 +1174,8 @@ def run_generation_job(job_id: str) -> None:
             finished_at=now_iso(),
             elapsed_seconds=calculate_elapsed_seconds(started_at),
         )
+    finally:
+        unregister_worker(job_id)
 
 
 @app.get("/")
@@ -1133,7 +1273,9 @@ def api_upload():
         "chapters": chapters,
         "run_folder": None,
         "generated_files": [],
-                "config": {
+        "stop_requested": False,
+        "stop_requested_at": None,
+        "config": {
             "output_dir": str(DEFAULT_OUTPUT_DIR),
             "output_name": suggested_name,
             "mode": "single",
@@ -1171,8 +1313,8 @@ def api_generate():
     if not job:
         return jsonify({"error": "Job not found."}), 404
 
-    if job.get("status") == "running":
-        return jsonify({"error": "Job is already running."}), 409
+    if job.get("status") in ACTIVE_JOB_STATUSES:
+        return jsonify({"error": "Job is already active."}), 409
 
     mode = str(data.get("mode", "single")).strip().lower()
     if mode not in {"single", "chapter"}:
@@ -1221,13 +1363,97 @@ def api_generate():
         finished_at=None,
         elapsed_seconds=None,
         estimated_seconds=estimated_seconds,
+        stop_requested=False,
+        stop_requested_at=None,
         config=config,
     )
 
     worker = threading.Thread(target=run_generation_job, args=(job_id,), daemon=True)
+    register_worker(job_id, worker)
     worker.start()
 
     return jsonify({"ok": True, "job_id": job_id})
+
+
+@app.post("/api/jobs/<job_id>/stop")
+def api_job_stop(job_id: str):
+    if not is_valid_job_id(job_id):
+        return jsonify({"error": "job_id format is invalid."}), 400
+
+    job = get_job(job_id)
+    if not job:
+        return jsonify({"error": "Job not found."}), 404
+
+    if job.get("status") in {"completed", "failed"}:
+        return jsonify({"error": "Only active jobs can be stopped."}), 409
+
+    if job.get("status") == "stopped":
+        return jsonify({"ok": True, "job": serialize_job_status(job)})
+
+    if not is_job_active(job_id, job):
+        finalize_stopped_job(job_id, job.get("started_at"), list(job.get("generated_files") or []))
+        stopped_job = get_job(job_id)
+        return jsonify({"ok": True, "job": serialize_job_status(stopped_job or job)})
+
+    if not job.get("stop_requested"):
+        update_job(
+            job_id,
+            stop_requested=True,
+            stop_requested_at=now_iso(),
+            status="stopping",
+            message="Stop requested. Waiting for the current step to finish.",
+            error=None,
+        )
+
+    updated_job = get_job(job_id)
+    return jsonify({"ok": True, "job": serialize_job_status(updated_job or job)})
+
+
+@app.post("/api/jobs/<job_id>/clear-files")
+def api_job_clear_files(job_id: str):
+    if not is_valid_job_id(job_id):
+        return jsonify({"error": "job_id format is invalid."}), 400
+
+    job = get_job(job_id)
+    if not job:
+        return jsonify({"error": "Job not found."}), 404
+
+    if job.get("status") != "stopped":
+        return jsonify({"error": "Only stopped jobs can clear generated files."}), 409
+
+    if is_job_active(job_id, job):
+        return jsonify({"error": "Stop is still in progress. Wait for the job to finish stopping."}), 409
+
+    files = list_generated_files(job)
+    run_folder = str(job.get("run_folder") or "").strip()
+    if not run_folder and not files and not job.get("generated_files"):
+        update_job(job_id, message="Generated files were already cleared.")
+        refreshed = get_job(job_id)
+        return jsonify({"ok": True, "job": serialize_job_status(refreshed or job), "files_cleared": []})
+
+    run_path = Path(run_folder).resolve(strict=False) if run_folder else None
+    allowed_root, root_err = get_allowed_output_root()
+    if root_err or not allowed_root:
+        return jsonify({"error": root_err or "Unable to resolve allowed output root."}), 500
+
+    if run_path:
+        try:
+            run_path.relative_to(allowed_root)
+        except ValueError:
+            return jsonify({"error": "Run folder is outside the allowed output root."}), 400
+        shutil.rmtree(run_path, ignore_errors=True)
+
+    cleared_names = [entry["name"] for entry in files] or list(job.get("generated_files") or [])
+    update_job(
+        job_id,
+        run_folder=None,
+        generated_files=[],
+        message="Generated files cleared.",
+        error=None,
+    )
+
+    refreshed = get_job(job_id)
+    return jsonify({"ok": True, "job": serialize_job_status(refreshed or job), "files_cleared": cleared_names})
 
 
 @app.get("/api/jobs/<job_id>/status")
@@ -1239,28 +1465,7 @@ def api_job_status(job_id: str):
     if not job:
         return jsonify({"error": "Job not found."}), 404
 
-    elapsed_seconds = job.get("elapsed_seconds")
-    if elapsed_seconds is None and job.get("started_at"):
-        elapsed_seconds = calculate_elapsed_seconds(job.get("started_at"), job.get("finished_at"))
-
-    return jsonify(
-        {
-            "id": job["id"],
-            "status": job["status"],
-            "progress": job["progress"],
-            "message": job["message"],
-            "error": job["error"],
-            "started_at": job.get("started_at"),
-            "finished_at": job.get("finished_at"),
-            "elapsed_seconds": elapsed_seconds,
-            "estimated_seconds": job.get("estimated_seconds"),
-            "device": job.get("device") or job.get("config", {}).get("device", "auto"),
-            "detected_title": job["detected_title"],
-            "chapters_count": job["chapters_count"],
-            "run_folder": job["run_folder"],
-            "updated_at": job["updated_at"],
-        }
-    )
+    return jsonify(serialize_job_status(job))
 
 
 @app.get("/api/jobs/<job_id>/files")
@@ -1275,7 +1480,15 @@ def api_job_files(job_id: str):
     files = list_generated_files(job)
     update_job(job_id, generated_files=[f["name"] for f in files])
 
-    return jsonify({"job_id": job_id, "files": files})
+    refreshed = get_job(job_id)
+    return jsonify(
+        {
+            "job_id": job_id,
+            "files": files,
+            "can_clear_files": can_clear_job_files(refreshed or job),
+            "files_cleared": job_files_cleared(refreshed or job),
+        }
+    )
 
 
 @app.get("/api/jobs/<job_id>/file/<path:filename>")

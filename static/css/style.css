@@ -344,6 +344,49 @@ select:disabled {
   transform: none;
 }
 
+.btn-secondary {
+  padding: 0.625rem 0.875rem;
+  font-size: 0.8125rem;
+  font-weight: 600;
+  border: 1px solid #cbd5e1;
+  border-radius: 6px;
+  background: #ffffff;
+  color: #0f172a;
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.btn-secondary:hover:not(:disabled) {
+  border-color: #94a3b8;
+  box-shadow: 0 2px 4px rgba(15, 23, 42, 0.08);
+}
+
+.btn-secondary:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+  box-shadow: none;
+}
+
+.btn-stop {
+  color: #9f1239;
+  border-color: #fda4af;
+  background: #fff1f2;
+}
+
+.btn-stop:hover:not(:disabled) {
+  border-color: #fb7185;
+}
+
+.btn-clear {
+  color: #92400e;
+  border-color: #fcd34d;
+  background: #fffbeb;
+}
+
+.btn-clear:hover:not(:disabled) {
+  border-color: #f59e0b;
+}
+
 /* ============================================================
    STATUS PANEL
    ============================================================ */
@@ -376,9 +419,29 @@ select:disabled {
   color: #64748b;
 }
 
+.status-badge.uploaded {
+  background: #ede9fe;
+  color: #6d28d9;
+}
+
+.status-badge.queued {
+  background: #e0f2fe;
+  color: #075985;
+}
+
 .status-badge.working {
   background: #dbeafe;
   color: #1e40af;
+}
+
+.status-badge.stopping {
+  background: #fff7ed;
+  color: #c2410c;
+}
+
+.status-badge.stopped {
+  background: #fef3c7;
+  color: #92400e;
 }
 
 .status-badge.completed {
@@ -429,6 +492,13 @@ select:disabled {
   font-size: 0.8125rem;
   border-top: 1px solid #e2e8f0;
   padding-top: 0.75rem;
+}
+
+.job-actions {
+  display: flex;
+  gap: 0.75rem;
+  flex-wrap: wrap;
+  margin-bottom: 1rem;
 }
 
 .job-meta-grid {

@@ -2,7 +2,11 @@ const state = {
   jobId: null,
   pollTimer: null,
   chaptersCount: null,
+  stopRequestInFlight: false,
+  clearRequestInFlight: false,
 };
+
+const TERMINAL_STATUSES = new Set(["completed", "failed", "stopped"]);
 
 function byId(id) {
   return document.getElementById(id);
@@ -38,10 +42,44 @@ function updateEstimatedFiles() {
 
 function setBadge(status) {
   const safeStatus = status || "idle";
+  const badgeClassMap = {
+    running: "working",
+  };
   const badge = byId("statusBadge");
   if (!badge) return;
   badge.textContent = safeStatus.charAt(0).toUpperCase() + safeStatus.slice(1);
-  badge.className = `status-badge ${safeStatus}`;
+  badge.className = `status-badge ${badgeClassMap[safeStatus] || safeStatus}`;
+}
+
+function setActionVisibility(element, visible) {
+  if (!element) return;
+  element.hidden = !visible;
+}
+
+function updateJobActions(statusData) {
+  const stopButton = byId("stopButton");
+  const clearFilesButton = byId("clearFilesButton");
+  const generateButton = byId("generateButton");
+
+  const canStop = Boolean(statusData && statusData.can_stop);
+  const canClearFiles = Boolean(statusData && statusData.can_clear_files);
+  const isBusy = Boolean(statusData && (statusData.active || statusData.status === "stopping"));
+
+  setActionVisibility(stopButton, canStop || state.stopRequestInFlight);
+  if (stopButton) {
+    stopButton.disabled = state.stopRequestInFlight || !canStop;
+    stopButton.textContent = state.stopRequestInFlight ? "Stopping..." : "Stop Generation";
+  }
+
+  setActionVisibility(clearFilesButton, canClearFiles || state.clearRequestInFlight);
+  if (clearFilesButton) {
+    clearFilesButton.disabled = state.clearRequestInFlight || !canClearFiles;
+    clearFilesButton.textContent = state.clearRequestInFlight ? "Clearing..." : "Clear Generated Files";
+  }
+
+  if (generateButton) {
+    generateButton.disabled = !state.jobId || isBusy || state.stopRequestInFlight || state.clearRequestInFlight;
+  }
 }
 
 function formatBytes(bytes) {
@@ -200,6 +238,59 @@ function renderFiles(files) {
   });
 }
 
+async function postJobAction(path, fallbackError) {
+  const csrfToken = getCsrfToken();
+  if (!csrfToken) {
+    throw new Error("Missing CSRF token. Refresh the page and try again.");
+  }
+
+  const response = await fetch(path, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "X-CSRF-Token": csrfToken,
+    },
+    body: JSON.stringify({}),
+  });
+
+  const payload = await response.json();
+  if (!response.ok) {
+    throw new Error(payload.error || fallbackError);
+  }
+
+  return payload;
+}
+
+async function stopJob() {
+  if (!state.jobId || state.stopRequestInFlight) return;
+
+  state.stopRequestInFlight = true;
+  updateJobActions({ can_stop: false, can_clear_files: false, active: true, status: "stopping" });
+
+  try {
+    const payload = await postJobAction(`/api/jobs/${state.jobId}/stop`, "Failed to stop generation");
+    byId("statusMessage").textContent = payload.job && payload.job.message ? payload.job.message : "Stop requested.";
+    startPolling();
+  } finally {
+    state.stopRequestInFlight = false;
+  }
+}
+
+async function clearGeneratedFiles() {
+  if (!state.jobId || state.clearRequestInFlight) return;
+
+  state.clearRequestInFlight = true;
+  updateJobActions({ can_stop: false, can_clear_files: false, active: false, status: "stopped" });
+
+  try {
+    const payload = await postJobAction(`/api/jobs/${state.jobId}/clear-files`, "Failed to clear generated files");
+    byId("statusMessage").textContent = payload.job && payload.job.message ? payload.job.message : "Generated files cleared.";
+    await refreshJob();
+  } finally {
+    state.clearRequestInFlight = false;
+  }
+}
+
 async function refreshJob() {
   if (!state.jobId) return;
 
@@ -215,6 +306,9 @@ async function refreshJob() {
     if (!statusResponse.ok) {
       throw new Error(statusData.error || "Status check failed");
     }
+    if (!filesResponse.ok) {
+      throw new Error(filesData.error || "File listing failed");
+    }
 
     if (statusData.chapters_count !== null && statusData.chapters_count !== undefined) {
       state.chaptersCount = statusData.chapters_count;
@@ -227,13 +321,15 @@ async function refreshJob() {
 
     renderJobDetails(statusData);
     renderFiles(filesData.files || []);
+    updateJobActions(statusData);
 
-    if (["completed", "failed"].includes(statusData.status)) {
+    if (TERMINAL_STATUSES.has(statusData.status)) {
       stopPolling();
     }
   } catch (error) {
     setBadge("failed");
     byId("statusMessage").textContent = error.message;
+    updateJobActions({ can_stop: false, can_clear_files: false, active: false, status: "failed" });
     stopPolling();
   }
 }
@@ -289,6 +385,8 @@ async function uploadEpubFile(file) {
 
   setBadge("uploaded");
   byId("progressBar").value = 0;
+  renderFiles([]);
+  updateJobActions({ can_stop: false, can_clear_files: false, active: false, status: "uploaded" });
   updateEstimatedFiles();
 
   return payload;
@@ -349,6 +447,7 @@ async function generateAudio() {
 
   setBadge("queued");
   byId("statusMessage").textContent = "Generation queued.";
+  updateJobActions({ can_stop: false, can_clear_files: false, active: true, status: "queued" });
   startPolling();
 }
 
@@ -406,9 +505,34 @@ function bindEvents() {
     });
   }
 
+  const stopButton = byId("stopButton");
+  if (stopButton) {
+    stopButton.addEventListener("click", async () => {
+      try {
+        await stopJob();
+      } catch (error) {
+        byId("statusMessage").textContent = error.message;
+        updateJobActions({ can_stop: true, can_clear_files: false, active: true, status: "running" });
+      }
+    });
+  }
+
+  const clearFilesButton = byId("clearFilesButton");
+  if (clearFilesButton) {
+    clearFilesButton.addEventListener("click", async () => {
+      try {
+        await clearGeneratedFiles();
+      } catch (error) {
+        byId("statusMessage").textContent = error.message;
+        updateJobActions({ can_stop: false, can_clear_files: true, active: false, status: "stopped" });
+      }
+    });
+  }
+
   const modeInputs = document.querySelectorAll('input[name="mode"]');
   modeInputs.forEach((input) => input.addEventListener("change", updateEstimatedFiles));
 
+  updateJobActions({ can_stop: false, can_clear_files: false, active: false, status: "idle" });
   updateEstimatedFiles();
 }
 

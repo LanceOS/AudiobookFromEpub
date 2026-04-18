@@ -67,7 +67,13 @@ class ApiRoutesTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200, payload)
         return payload
 
-    def _start_generation(self, job_id: str, output_dir: str, mode: str = "single") -> dict[str, object]:
+    def _start_generation(
+        self,
+        job_id: str,
+        output_dir: str,
+        mode: str = "single",
+        hf_model_id: str = "",
+    ) -> dict[str, object]:
         response = self.client.post(
             "/api/generate",
             json={
@@ -76,6 +82,7 @@ class ApiRoutesTests(unittest.TestCase):
                 "output_name": "route test",
                 "mode": mode,
                 "voice": "af_heart",
+                "hf_model_id": hf_model_id,
             },
             headers=self._headers(),
         )
@@ -222,6 +229,53 @@ class ApiRoutesTests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 400)
         self.assertIn("inside allowed root", str(payload.get("error", "")))
+
+    def test_generate_rejects_invalid_hf_model_id(self) -> None:
+        upload_payload = self._upload_placeholder_epub()
+
+        response = self.client.post(
+            "/api/generate",
+            json={
+                "job_id": upload_payload["job_id"],
+                "output_dir": str(DEFAULT_OUTPUT_DIR),
+                "output_name": "invalid-model",
+                "mode": "single",
+                "voice": "af_heart",
+                "hf_model_id": "../../etc/passwd",
+            },
+            headers=self._headers(),
+        )
+        payload = response.get_json(silent=True) or {}
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("Hugging Face model ID", str(payload.get("error", "")))
+
+    def test_generate_accepts_hf_model_id_and_stores_it(self) -> None:
+        upload_payload = self._upload_placeholder_epub()
+        output_dir = self._new_output_dir()
+        model_id = "hexgrad/Kokoro-82M"
+        job_id = str(upload_payload["job_id"])
+
+        response = self.client.post(
+            "/api/generate",
+            json={
+                "job_id": job_id,
+                "output_dir": output_dir,
+                "output_name": "model-id",
+                "mode": "single",
+                "voice": "af_heart",
+                "hf_model_id": model_id,
+            },
+            headers=self._headers(),
+        )
+        payload = response.get_json(silent=True) or {}
+        self.assertEqual(response.status_code, 200, payload)
+
+        final_status = self._wait_for_terminal_status(job_id)
+        self.assertEqual(final_status.get("status"), "completed", final_status)
+
+        with JOBS_LOCK:
+            self.assertEqual(JOBS[job_id]["config"].get("hf_model_id"), model_id)
 
     def test_file_route_streams_audio_and_download_route_sets_attachment(self) -> None:
         job_id, filename = self._generate_single_file_job()

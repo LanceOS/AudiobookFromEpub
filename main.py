@@ -62,6 +62,7 @@ JOB_META_DIR = APP_DATA_DIR / "jobs"
 DEFAULT_OUTPUT_DIR = BASE_DIR / "generated_audio"
 ALLOWED_UPLOAD_EXTENSIONS = {".epub"}
 JOB_ID_RE = re.compile(r"^[a-f0-9]{32}$")
+HF_MODEL_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*(/[A-Za-z0-9][A-Za-z0-9._-]*)?$")
 
 VOICE_OPTIONS = [
     "af_heart",
@@ -181,6 +182,25 @@ def validate_output_directory(path_text: str) -> Tuple[Optional[Path], Optional[
         return None, "Output directory is not writable."
 
     return resolved_output, None
+
+
+def normalize_hf_model_id(raw_value: object) -> Optional[str]:
+    text = str(raw_value or "").strip()
+    return text or None
+
+
+def validate_hf_model_id(raw_value: object) -> Tuple[Optional[str], Optional[str]]:
+    model_id = normalize_hf_model_id(raw_value)
+    if model_id is None:
+        return None, None
+
+    if len(model_id) > 128:
+        return None, "Hugging Face model ID is too long."
+
+    if not HF_MODEL_ID_RE.fullmatch(model_id):
+        return None, "Hugging Face model ID must look like 'namespace/model' or 'model'."
+
+    return model_id, None
 
 
 def get_csrf_token() -> str:
@@ -581,12 +601,13 @@ def choose_voice_reference(voice: str) -> str:
     return voice
 
 
-def get_pipeline_bundle(voice: str, device: str) -> Dict:
+def get_pipeline_bundle(voice: str, device: str, hf_model_id: Optional[str] = None) -> Dict:
     if not HAS_KOKORO:
         raise RuntimeError(f"kokoro import failed: {KOKORO_IMPORT_ERROR}")
 
     lang_code = voice_to_lang_code(voice)
-    cache_key = f"{lang_code}:{device}"
+    model_cache_key = hf_model_id or "local_default"
+    cache_key = f"{lang_code}:{device}:{model_cache_key}"
 
     with PIPELINE_LOCK:
         cached = PIPELINE_CACHE.get(cache_key)
@@ -597,19 +618,35 @@ def get_pipeline_bundle(voice: str, device: str) -> Dict:
     checkpoint = BASE_DIR / "Kokoro-82M" / "kokoro-v1_0.pth"
     config_file = BASE_DIR / "Kokoro-82M" / "config.json"
 
-    if KModel and checkpoint.exists() and not is_lfs_pointer(checkpoint):
-        config_arg = None
-        if config_file.exists() and not is_lfs_pointer(config_file):
-            config_arg = str(config_file)
-        model_instance = KModel(config=config_arg, model=str(checkpoint)).to(device).eval()
+    if KModel:
+        if hf_model_id:
+            model_instance = KModel(repo_id=hf_model_id).to(device).eval()
+        elif checkpoint.exists() and not is_lfs_pointer(checkpoint):
+            config_arg = None
+            if config_file.exists() and not is_lfs_pointer(config_file):
+                config_arg = str(config_file)
+            model_instance = KModel(config=config_arg, model=str(checkpoint)).to(device).eval()
 
     if model_instance is not None:
-        pipeline = KPipeline(lang_code=lang_code, model=model_instance)
+        pipeline_kwargs: Dict[str, object] = {
+            "lang_code": lang_code,
+            "model": model_instance,
+        }
+        if hf_model_id:
+            pipeline_kwargs["repo_id"] = hf_model_id
+        pipeline = KPipeline(**pipeline_kwargs)
     else:
+        pipeline_kwargs: Dict[str, object] = {
+            "lang_code": lang_code,
+            "device": device,
+        }
+        if hf_model_id:
+            pipeline_kwargs["repo_id"] = hf_model_id
         try:
-            pipeline = KPipeline(lang_code=lang_code, device=device)
+            pipeline = KPipeline(**pipeline_kwargs)
         except TypeError:
-            pipeline = KPipeline(lang_code=lang_code)
+            pipeline_kwargs.pop("device", None)
+            pipeline = KPipeline(**pipeline_kwargs)
 
     bundle = {
         "pipeline": pipeline,
@@ -622,12 +659,18 @@ def get_pipeline_bundle(voice: str, device: str) -> Dict:
     return bundle
 
 
-def synthesize_text_to_wav(text: str, voice: str, output_path: Path, device: str = "cpu") -> None:
+def synthesize_text_to_wav(
+    text: str,
+    voice: str,
+    output_path: Path,
+    device: str = "cpu",
+    hf_model_id: Optional[str] = None,
+) -> None:
     chunks = split_text_into_chunks(text)
     if not chunks:
         raise ValueError("No text chunks available for synthesis.")
 
-    bundle = get_pipeline_bundle(voice, device)
+    bundle = get_pipeline_bundle(voice, device, hf_model_id=hf_model_id)
     pipeline = bundle["pipeline"]
     model = bundle["model"]
     voice_reference = choose_voice_reference(voice)
@@ -983,6 +1026,7 @@ def serialize_job_status(job: Dict) -> Dict:
         "elapsed_seconds": elapsed_seconds,
         "estimated_seconds": job.get("estimated_seconds"),
         "device": job.get("device") or job.get("config", {}).get("device", "auto"),
+        "hf_model_id": job.get("config", {}).get("hf_model_id"),
         "detected_title": job["detected_title"],
         "chapters_count": job["chapters_count"],
         "run_folder": job["run_folder"],
@@ -1075,6 +1119,7 @@ def run_generation_job(job_id: str) -> None:
         upload_path = Path(job["upload_path"])
         voice = str(job["config"].get("voice", "af_heart"))
         mode = str(job["config"].get("mode", "single"))
+        hf_model_id = normalize_hf_model_id(job["config"].get("hf_model_id"))
         output_name = slugify(str(job["config"].get("output_name", "audiobook")), fallback="audiobook")
         device = detect_device(str(job["config"].get("device", "cpu")))
         update_job(job_id, device=device)
@@ -1131,7 +1176,13 @@ def run_generation_job(job_id: str) -> None:
             combined_text = "\n\n".join(ch["text"] for ch in chapters)
             out_path = run_folder / f"{output_name}.wav"
             update_job(job_id, progress=45, message="Generating single audiobook file...")
-            synthesize_text_to_wav(combined_text, voice=voice, output_path=out_path, device=device)
+            synthesize_text_to_wav(
+                combined_text,
+                voice=voice,
+                output_path=out_path,
+                device=device,
+                hf_model_id=hf_model_id,
+            )
             generated_files.append(out_path.name)
             raise_if_stop_requested(job_id, started_at, generated_files)
             update_job(job_id, progress=95, message="Single file generation complete.")
@@ -1146,7 +1197,13 @@ def run_generation_job(job_id: str) -> None:
                     progress=progress_start,
                     message=f"Generating chapter {idx}/{total_chapters}: {chapter['title']}",
                 )
-                synthesize_text_to_wav(chapter["text"], voice=voice, output_path=out_path, device=device)
+                synthesize_text_to_wav(
+                    chapter["text"],
+                    voice=voice,
+                    output_path=out_path,
+                    device=device,
+                    hf_model_id=hf_model_id,
+                )
                 generated_files.append(out_path.name)
                 raise_if_stop_requested(job_id, started_at, generated_files)
 
@@ -1281,6 +1338,7 @@ def api_upload():
             "mode": "single",
             "voice": "af_heart",
             "device": "cpu",
+            "hf_model_id": None,
             "filter_level": filter_level,
         },
     }
@@ -1340,6 +1398,10 @@ def api_generate():
     if voice not in VOICE_OPTIONS:
         return jsonify({"error": "Unsupported voice."}), 400
 
+    hf_model_id, model_err = validate_hf_model_id(data.get("hf_model_id"))
+    if model_err:
+        return jsonify({"error": model_err}), 400
+
     estimated_seconds = estimate_generation_seconds(job, mode)
     requested_device = default_requested_device()
 
@@ -1349,6 +1411,7 @@ def api_generate():
         "mode": mode,
         "voice": voice,
         "device": requested_device,
+        "hf_model_id": hf_model_id,
     }
 
     update_job(

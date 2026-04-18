@@ -42,6 +42,7 @@ from main import (  # type: ignore[reportMissingImports]
     slugify,
     split_text_into_chunks,
     validate_output_directory,
+    validate_hf_model_id,
     voice_to_lang_code,
     extract_book_title,
 )
@@ -116,6 +117,20 @@ class HelperFunctionTests(unittest.TestCase):
         output_dir, error = validate_output_directory("")
         self.assertIsNone(output_dir)
         self.assertIn("Output directory is required", str(error))
+
+    def test_validate_hf_model_id_accepts_valid_values(self) -> None:
+        model_id, error = validate_hf_model_id("hexgrad/Kokoro-82M")
+        self.assertIsNone(error)
+        self.assertEqual(model_id, "hexgrad/Kokoro-82M")
+
+        model_id, error = validate_hf_model_id("Kokoro-82M")
+        self.assertIsNone(error)
+        self.assertEqual(model_id, "Kokoro-82M")
+
+    def test_validate_hf_model_id_rejects_invalid_values(self) -> None:
+        model_id, error = validate_hf_model_id("../../bad")
+        self.assertIsNone(model_id)
+        self.assertIn("Hugging Face model ID", str(error))
 
     def test_looks_like_valid_epub_checks_structure(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -287,6 +302,50 @@ class HelperFunctionTests(unittest.TestCase):
         self.assertIs(first, second)
         self.assertEqual(FakePipeline.init_calls, 1)
 
+    def test_pipeline_bundle_cache_includes_hf_model_id(self) -> None:
+        class FakePipeline:
+            init_calls = 0
+
+            def __init__(self, *args, **kwargs):
+                FakePipeline.init_calls += 1
+
+        with app_main.PIPELINE_LOCK:
+            app_main.PIPELINE_CACHE.clear()
+
+        with mock.patch.object(app_main, "HAS_KOKORO", True), mock.patch.object(app_main, "KPipeline", FakePipeline), mock.patch.object(app_main, "KModel", None):
+            first = app_main.get_pipeline_bundle("af_heart", "cpu", hf_model_id="org/model-a")
+            second = app_main.get_pipeline_bundle("af_heart", "cpu", hf_model_id="org/model-a")
+            third = app_main.get_pipeline_bundle("af_heart", "cpu", hf_model_id="org/model-b")
+
+        self.assertIs(first, second)
+        self.assertIsNot(first, third)
+        self.assertEqual(FakePipeline.init_calls, 2)
+
+    def test_pipeline_bundle_uses_repo_id_for_custom_hf_model(self) -> None:
+        class FakeModel:
+            def to(self, _device):
+                return self
+
+            def eval(self):
+                return self
+
+        class FakePipeline:
+            def __init__(self, *args, **kwargs):
+                self.kwargs = kwargs
+
+        with app_main.PIPELINE_LOCK:
+            app_main.PIPELINE_CACHE.clear()
+
+        with mock.patch.object(app_main, "HAS_KOKORO", True), mock.patch.object(app_main, "KPipeline", FakePipeline), mock.patch.object(
+            app_main,
+            "KModel",
+            mock.Mock(return_value=FakeModel()),
+        ) as model_ctor:
+            bundle = app_main.get_pipeline_bundle("af_heart", "cpu", hf_model_id="org/model-c")
+
+        model_ctor.assert_called_once_with(repo_id="org/model-c")
+        self.assertEqual(bundle["pipeline"].kwargs.get("repo_id"), "org/model-c")
+
     def test_synthesize_text_to_wav_writes_audio_using_pipeline_output(self) -> None:
         class FakePipeline:
             def __call__(self, chunk, voice=None):
@@ -310,6 +369,35 @@ class HelperFunctionTests(unittest.TestCase):
         self.assertTrue(write_mock.called)
         self.assertEqual(write_mock.call_args.args[0], str(output_path))
         self.assertEqual(write_mock.call_args.args[2], 24000)
+
+    def test_synthesize_text_to_wav_forwards_hf_model_id(self) -> None:
+        class FakePipeline:
+            def __call__(self, chunk, voice=None):
+                return iter([(None, None, np.array([0.1, -0.1], dtype=np.float32))])
+
+        bundle_mock = mock.Mock(return_value={"pipeline": FakePipeline(), "model": None})
+        write_mock = mock.Mock()
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            output_path = Path(temp_dir) / "out.wav"
+
+            with mock.patch.object(app_main, "split_text_into_chunks", return_value=["chunk"]), mock.patch.object(
+                app_main,
+                "get_pipeline_bundle",
+                bundle_mock,
+            ), mock.patch.object(app_main, "choose_voice_reference", return_value="af_heart"), mock.patch.dict(
+                sys.modules,
+                {"soundfile": mock.Mock(write=write_mock)},
+            ):
+                synthesize_text_to_wav(
+                    "text",
+                    voice="af_heart",
+                    output_path=output_path,
+                    device="cpu",
+                    hf_model_id="org/model-d",
+                )
+
+        bundle_mock.assert_called_once_with("af_heart", "cpu", hf_model_id="org/model-d")
 
     def test_voice_to_lang_code_parsing(self) -> None:
         self.assertEqual(voice_to_lang_code("af_heart"), "a")

@@ -156,6 +156,7 @@ function renderJobDetails(statusData) {
     ["Job", statusData.id],
     ["Detected Chapters", statusData.chapters_count],
     ["Device", statusData.device || "auto"],
+    ["HF Model", statusData.hf_model_id || "default (local/auto)"],
     ["Run Folder", statusData.run_folder || "not created yet"],
     ["Time Started", startedAt ? formatDateTime(startedAt) : "waiting to start"],
     ["Last Updated", formatDateTime(statusData.updated_at)],
@@ -423,6 +424,7 @@ async function generateAudio() {
     output_name: byId("outputName").value,
     output_dir: byId("outputDir").value,
     voice: byId("voiceSelect").value,
+    hf_model_id: byId("hfModelId") ? byId("hfModelId").value : "",
     mode: selectedMode(),
   };
 

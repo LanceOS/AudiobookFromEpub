@@ -58,6 +58,11 @@
               </select>
             </div>
             <div class="form-full">
+              <label class="field-label" for="hfModelId">Hugging Face Model (optional)</label>
+              <input id="hfModelId" type="text" placeholder="hexgrad/Kokoro-82M" />
+              <div class="field-hint">Use a Kokoro-compatible Hugging Face repository ID.</div>
+            </div>
+            <div class="form-full">
               <label class="field-label" for="outputDir">Output Directory</label>
               <input id="outputDir" type="text" value="{{ default_output_dir }}" />
             </div>

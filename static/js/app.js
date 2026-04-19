@@ -22,6 +22,16 @@ function selectedMode() {
   return option ? option.value : "single";
 }
 
+function syncVoiceSelectionState() {
+  const voiceSelect = byId("voiceSelect");
+  const hfModelInput = byId("hfModelId");
+  if (!voiceSelect || !hfModelInput) return;
+
+  const hasCustomModel = Boolean(hfModelInput.value && hfModelInput.value.trim());
+  voiceSelect.disabled = hasCustomModel;
+  voiceSelect.setAttribute("aria-disabled", hasCustomModel ? "true" : "false");
+}
+
 function updateEstimatedFiles() {
   const output = byId("estimatedFiles");
   if (!output) return;
@@ -534,8 +544,14 @@ function bindEvents() {
   const modeInputs = document.querySelectorAll('input[name="mode"]');
   modeInputs.forEach((input) => input.addEventListener("change", updateEstimatedFiles));
 
+  const hfModelInput = byId("hfModelId");
+  if (hfModelInput) {
+    hfModelInput.addEventListener("input", syncVoiceSelectionState);
+  }
+
   updateJobActions({ can_stop: false, can_clear_files: false, active: false, status: "idle" });
   updateEstimatedFiles();
+  syncVoiceSelectionState();
 }
 
 window.addEventListener("beforeunload", stopPolling);

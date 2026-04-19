@@ -51,16 +51,17 @@
             </div>
             <div>
               <label class="field-label" for="voiceSelect">Voice</label>
-              <select id="voiceSelect">
+              <select id="voiceSelect" aria-describedby="voiceHint">
                 {% for voice in voices %}
                 <option value="{{ voice }}">{{ voice }}</option>
                 {% endfor %}
               </select>
+              <div id="voiceHint" class="field-hint">Used by the default Kokoro fallback model.</div>
             </div>
             <div class="form-full">
               <label class="field-label" for="hfModelId">Hugging Face Model (optional)</label>
               <input id="hfModelId" type="text" placeholder="hexgrad/Kokoro-82M" />
-              <div class="field-hint">Use a Kokoro-compatible Hugging Face repository ID.</div>
+              <div class="field-hint">Downloaded to <code>.app_data/hf_models</code>. If incompatible, generation falls back to default Kokoro.</div>
             </div>
             <div class="form-full">
               <label class="field-label" for="outputDir">Output Directory</label>

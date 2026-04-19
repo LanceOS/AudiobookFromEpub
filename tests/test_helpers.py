@@ -11,6 +11,7 @@ import time
 import unittest
 import zipfile
 from pathlib import Path
+from types import SimpleNamespace
 from unittest import mock
 
 import numpy as np
@@ -132,6 +133,70 @@ class HelperFunctionTests(unittest.TestCase):
         model_id, error = validate_hf_model_id("../../bad")
         self.assertIsNone(model_id)
         self.assertIn("Hugging Face model ID", str(error))
+
+    def test_get_hf_model_cache_path_sanitizes_model_id(self) -> None:
+        with mock.patch.object(app_main, "get_hf_model_cache_root", return_value=Path("/tmp/hf-cache")):
+            cache_path = app_main.get_hf_model_cache_path("openbmb/VoxCPM2")
+
+        self.assertEqual(cache_path, Path("/tmp/hf-cache/openbmb__VoxCPM2"))
+
+    def test_download_hf_model_snapshot_uses_local_cache(self) -> None:
+        with tempfile.TemporaryDirectory() as cache_root:
+            snapshot_download_mock = mock.Mock(return_value=str(Path(cache_root) / "snapshot"))
+            fake_hf_hub = mock.Mock(snapshot_download=snapshot_download_mock)
+
+            with mock.patch.object(app_main, "get_hf_model_cache_root", return_value=Path(cache_root)), mock.patch.dict(
+                os.environ,
+                {"HF_TOKEN": "", "HUGGINGFACE_HUB_TOKEN": ""},
+                clear=False,
+            ), mock.patch.dict(
+                sys.modules,
+                {"huggingface_hub": fake_hf_hub},
+            ):
+                model_path, error = app_main.download_hf_model_snapshot("openbmb/VoxCPM2")
+
+            self.assertIsNone(error)
+            self.assertIsNotNone(model_path)
+            self.assertTrue(Path(str(model_path)).exists())
+            self.assertIn("openbmb__VoxCPM2", str(model_path))
+            self.assertEqual(snapshot_download_mock.call_args.kwargs.get("local_dir"), str(model_path))
+
+    def test_download_hf_model_snapshot_reports_progress(self) -> None:
+        with tempfile.TemporaryDirectory() as cache_root:
+            dry_run_files = [
+                SimpleNamespace(filename="config.json", file_size=100, will_download=True),
+                SimpleNamespace(filename="weights/model.pth", file_size=300, will_download=True),
+            ]
+
+            snapshot_download_mock = mock.Mock(return_value=dry_run_files)
+            hf_hub_download_mock = mock.Mock(return_value=str(Path(cache_root) / "downloaded"))
+            fake_hf_hub = mock.Mock(
+                snapshot_download=snapshot_download_mock,
+                hf_hub_download=hf_hub_download_mock,
+            )
+
+            progress_events = []
+
+            with mock.patch.object(app_main, "get_hf_model_cache_root", return_value=Path(cache_root)), mock.patch.dict(
+                os.environ,
+                {"HF_TOKEN": "", "HUGGINGFACE_HUB_TOKEN": ""},
+                clear=False,
+            ), mock.patch.dict(
+                sys.modules,
+                {"huggingface_hub": fake_hf_hub},
+            ):
+                model_path, error = app_main.download_hf_model_snapshot(
+                    "openbmb/VoxCPM2",
+                    progress_callback=lambda percent, message: progress_events.append((percent, message)),
+                )
+
+            self.assertIsNone(error)
+            self.assertIsNotNone(model_path)
+            self.assertGreaterEqual(len(progress_events), 3)
+            self.assertEqual(progress_events[0][0], 0)
+            self.assertEqual(progress_events[-1][0], 100)
+            self.assertIn("Downloading model files", " ".join(event[1] for event in progress_events))
+            self.assertEqual(hf_hub_download_mock.call_count, 2)
 
     def test_looks_like_valid_epub_checks_structure(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -319,8 +384,8 @@ class HelperFunctionTests(unittest.TestCase):
             third = app_main.get_pipeline_bundle("af_heart", "cpu", hf_model_id="org/model-b")
 
         self.assertIs(first, second)
-        self.assertIsNot(first, third)
-        self.assertEqual(FakePipeline.init_calls, 2)
+        self.assertIs(first, third)
+        self.assertEqual(FakePipeline.init_calls, 1)
 
     def test_pipeline_bundle_uses_repo_id_for_custom_hf_model(self) -> None:
         class FakeModel:
@@ -337,15 +402,64 @@ class HelperFunctionTests(unittest.TestCase):
         with app_main.PIPELINE_LOCK:
             app_main.PIPELINE_CACHE.clear()
 
+        with tempfile.TemporaryDirectory() as model_dir:
+            model_root = Path(model_dir)
+            config_path = model_root / "config.json"
+            weights_path = model_root / "kokoro-v1_0.pth"
+            config_path.write_text("{}", encoding="utf-8")
+            weights_path.write_bytes(b"test")
+
+            with mock.patch.object(app_main, "HAS_KOKORO", True), mock.patch.object(app_main, "KPipeline", FakePipeline), mock.patch.object(
+                app_main,
+                "KModel",
+                mock.Mock(return_value=FakeModel()),
+            ) as model_ctor, mock.patch.object(
+                app_main,
+                "download_hf_model_snapshot",
+                return_value=(model_root, None),
+            ), mock.patch.object(
+                app_main,
+                "resolve_local_kokoro_assets",
+                return_value=(config_path, weights_path, None),
+            ):
+                bundle = app_main.get_pipeline_bundle("af_heart", "cpu", hf_model_id="org/model-c")
+
+        model_ctor.assert_called_once_with(
+            repo_id="org/model-c",
+            config=str(config_path),
+            model=str(weights_path),
+        )
+        self.assertEqual(bundle["pipeline"].kwargs.get("repo_id"), "org/model-c")
+
+    def test_pipeline_bundle_falls_back_to_default_when_custom_model_is_incompatible(self) -> None:
+        class FakePipeline:
+            init_calls = 0
+
+            def __init__(self, *args, **kwargs):
+                FakePipeline.init_calls += 1
+
+        with app_main.PIPELINE_LOCK:
+            app_main.PIPELINE_CACHE.clear()
+
         with mock.patch.object(app_main, "HAS_KOKORO", True), mock.patch.object(app_main, "KPipeline", FakePipeline), mock.patch.object(
             app_main,
             "KModel",
-            mock.Mock(return_value=FakeModel()),
-        ) as model_ctor:
-            bundle = app_main.get_pipeline_bundle("af_heart", "cpu", hf_model_id="org/model-c")
+            mock.Mock(),
+        ) as model_ctor, mock.patch.object(
+            app_main,
+            "download_hf_model_snapshot",
+            return_value=(Path("/tmp/not-used"), None),
+        ), mock.patch.object(
+            app_main,
+            "resolve_local_kokoro_assets",
+            return_value=(None, None, "missing config.json"),
+        ):
+            custom_bundle = app_main.get_pipeline_bundle("af_heart", "cpu", hf_model_id="org/not-kokoro")
+            default_bundle = app_main.get_pipeline_bundle("af_heart", "cpu")
 
-        model_ctor.assert_called_once_with(repo_id="org/model-c")
-        self.assertEqual(bundle["pipeline"].kwargs.get("repo_id"), "org/model-c")
+        self.assertIs(custom_bundle, default_bundle)
+        model_ctor.assert_not_called()
+        self.assertEqual(FakePipeline.init_calls, 1)
 
     def test_synthesize_text_to_wav_writes_audio_using_pipeline_output(self) -> None:
         class FakePipeline:

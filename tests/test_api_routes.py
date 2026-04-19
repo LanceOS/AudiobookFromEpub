@@ -124,6 +124,12 @@ class ApiRoutesTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertIn(b"EPUB to Audiobook", response.data)
 
+    def test_index_shows_hf_cache_and_fallback_hint(self) -> None:
+        response = self.client.get("/")
+        self.assertEqual(response.status_code, 200)
+        self.assertIn(b".app_data/hf_models", response.data)
+        self.assertIn(b"falls back to default Kokoro", response.data)
+
     def test_health_route_returns_ok_json(self) -> None:
         response = self.client.get("/health")
         payload = response.get_json(silent=True) or {}

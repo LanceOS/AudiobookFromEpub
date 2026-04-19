@@ -25,7 +25,7 @@ import uuid
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Callable, Dict, List, Optional, Tuple
 from urllib.parse import urlparse
 
 import numpy as np
@@ -60,9 +60,11 @@ APP_DATA_DIR = BASE_DIR / ".app_data"
 UPLOADS_DIR = APP_DATA_DIR / "uploads"
 JOB_META_DIR = APP_DATA_DIR / "jobs"
 DEFAULT_OUTPUT_DIR = BASE_DIR / "generated_audio"
+DEFAULT_HF_MODEL_CACHE_DIR = APP_DATA_DIR / "hf_models"
 ALLOWED_UPLOAD_EXTENSIONS = {".epub"}
 JOB_ID_RE = re.compile(r"^[a-f0-9]{32}$")
 HF_MODEL_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*(/[A-Za-z0-9][A-Za-z0-9._-]*)?$")
+HF_MODEL_CACHE_DIR_SEGMENT_RE = re.compile(r"[^A-Za-z0-9._-]+")
 
 VOICE_OPTIONS = [
     "af_heart",
@@ -133,6 +135,7 @@ def ensure_app_dirs() -> None:
     UPLOADS_DIR.mkdir(parents=True, exist_ok=True)
     JOB_META_DIR.mkdir(parents=True, exist_ok=True)
     DEFAULT_OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    get_hf_model_cache_root().mkdir(parents=True, exist_ok=True)
     maybe_cleanup_stale_data()
 
 
@@ -190,6 +193,187 @@ def validate_hf_model_id(raw_value: object) -> Tuple[Optional[str], Optional[str
         return None, "Hugging Face model ID must look like 'namespace/model' or 'model'."
 
     return model_id, None
+
+
+def get_hf_model_cache_root() -> Path:
+    cache_root = os.getenv("AUDIOBOOK_HF_MODEL_CACHE_DIR", str(DEFAULT_HF_MODEL_CACHE_DIR)).strip()
+    return Path(cache_root or str(DEFAULT_HF_MODEL_CACHE_DIR)).expanduser().resolve(strict=False)
+
+
+def get_hf_model_cache_path(model_id: str) -> Path:
+    normalized = str(model_id or "").strip()
+    safe_segment = HF_MODEL_CACHE_DIR_SEGMENT_RE.sub("__", normalized).strip("._")
+    if not safe_segment:
+        safe_segment = "model"
+    return get_hf_model_cache_root() / safe_segment
+
+
+def download_hf_model_snapshot(
+    model_id: str,
+    progress_callback: Optional[Callable[[int, str], None]] = None,
+) -> Tuple[Optional[Path], Optional[str]]:
+    cache_path = get_hf_model_cache_path(model_id)
+
+    def emit_progress(percent: int, message: str) -> None:
+        if progress_callback is None:
+            return
+        bounded = max(0, min(100, int(percent)))
+        progress_callback(bounded, message)
+
+    emit_progress(0, f"Preparing download for model '{model_id}'...")
+
+    try:
+        cache_path.mkdir(parents=True, exist_ok=True)
+    except Exception as exc:
+        return None, f"Unable to prepare local model cache: {exc}"
+
+    try:
+        from huggingface_hub import hf_hub_download, snapshot_download  # type: ignore[reportMissingImports]
+    except Exception as exc:
+        return None, f"huggingface_hub is unavailable: {exc}"
+
+    token = (os.getenv("HF_TOKEN") or os.getenv("HUGGINGFACE_HUB_TOKEN") or "").strip() or None
+
+    def download_single_file(filename: str) -> Optional[str]:
+        kwargs: Dict[str, object] = {
+            "repo_id": model_id,
+            "filename": filename,
+            "local_dir": str(cache_path),
+        }
+        if token:
+            kwargs["token"] = token
+
+        try:
+            hf_hub_download(**kwargs)
+            return None
+        except TypeError:
+            legacy_kwargs: Dict[str, object] = {
+                "repo_id": model_id,
+                "filename": filename,
+                "local_dir": str(cache_path),
+            }
+            if token:
+                legacy_kwargs["use_auth_token"] = token
+            try:
+                hf_hub_download(**legacy_kwargs)
+                return None
+            except Exception as exc:
+                return str(exc)
+        except Exception as exc:
+            return str(exc)
+
+    primary_kwargs: Dict[str, object] = {
+        "repo_id": model_id,
+        "local_dir": str(cache_path),
+    }
+    if token:
+        primary_kwargs["token"] = token
+
+    if progress_callback is None:
+        try:
+            snapshot_download(**primary_kwargs)
+        except TypeError:
+            legacy_kwargs: Dict[str, object] = {
+                "repo_id": model_id,
+                "local_dir": str(cache_path),
+            }
+            if token:
+                legacy_kwargs["use_auth_token"] = token
+            try:
+                snapshot_download(**legacy_kwargs)
+            except Exception as exc:
+                return None, f"Unable to download Hugging Face model '{model_id}': {exc}"
+        except Exception as exc:
+            return None, f"Unable to download Hugging Face model '{model_id}': {exc}"
+
+        return cache_path, None
+
+    dry_run_files: List[object] = []
+    try:
+        dry_run_result = snapshot_download(dry_run=True, **primary_kwargs)
+        if isinstance(dry_run_result, list):
+            dry_run_files = list(dry_run_result)
+    except TypeError:
+        # Older huggingface_hub may not support dry_run.
+        dry_run_files = []
+    except Exception as exc:
+        return None, f"Unable to inspect Hugging Face model '{model_id}': {exc}"
+
+    if dry_run_files:
+        total_bytes = sum(max(0, int(getattr(entry, "file_size", 0) or 0)) for entry in dry_run_files)
+        if total_bytes <= 0:
+            total_bytes = max(1, len(dry_run_files))
+
+        downloaded_bytes = 0
+        completed_files = 0
+        total_files = len(dry_run_files)
+
+        for entry in dry_run_files:
+            filename = str(getattr(entry, "filename", "")).strip()
+            if not filename:
+                continue
+
+            file_size = max(0, int(getattr(entry, "file_size", 0) or 0))
+            will_download = bool(getattr(entry, "will_download", True))
+            if will_download:
+                download_err = download_single_file(filename)
+                if download_err:
+                    return None, f"Unable to download Hugging Face model '{model_id}': {download_err}"
+
+            completed_files += 1
+            downloaded_bytes += file_size if file_size > 0 else 1
+            ratio = downloaded_bytes / max(1, total_bytes)
+            percent = int(min(100, ratio * 100))
+            emit_progress(percent, f"Downloading model files... {percent}% ({completed_files}/{total_files})")
+
+        emit_progress(100, f"Model download complete ({completed_files}/{total_files} files).")
+        return cache_path, None
+
+    try:
+        snapshot_download(**primary_kwargs)
+    except TypeError:
+        legacy_kwargs: Dict[str, object] = {
+            "repo_id": model_id,
+            "local_dir": str(cache_path),
+        }
+        if token:
+            legacy_kwargs["use_auth_token"] = token
+        try:
+            snapshot_download(**legacy_kwargs)
+        except Exception as exc:
+            return None, f"Unable to download Hugging Face model '{model_id}': {exc}"
+    except Exception as exc:
+        return None, f"Unable to download Hugging Face model '{model_id}': {exc}"
+
+    emit_progress(100, "Model download complete.")
+    return cache_path, None
+
+
+def resolve_local_kokoro_assets(model_cache_path: Path) -> Tuple[Optional[Path], Optional[Path], Optional[str]]:
+    config_path = model_cache_path / "config.json"
+    if not config_path.exists() or not config_path.is_file():
+        return None, None, "missing config.json"
+
+    try:
+        config_payload = json.loads(config_path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        return None, None, f"invalid config.json ({exc})"
+
+    if not isinstance(config_payload, dict) or "vocab" not in config_payload:
+        return None, None, "config.json is not Kokoro-compatible (missing 'vocab')"
+
+    candidates: List[Path] = []
+    for candidate in model_cache_path.rglob("*.pth"):
+        if ".cache" in candidate.parts:
+            continue
+        if candidate.is_file():
+            candidates.append(candidate)
+
+    if not candidates:
+        return None, None, "no .pth weight file found"
+
+    candidates.sort(key=lambda item: (0 if "kokoro" in item.name.lower() else 1, len(item.name), item.name.lower()))
+    return config_path, candidates[0], None
 
 
 def get_csrf_token() -> str:
@@ -590,12 +774,18 @@ def choose_voice_reference(voice: str) -> str:
     return voice
 
 
-def get_pipeline_bundle(voice: str, device: str, hf_model_id: Optional[str] = None) -> Dict:
+def get_pipeline_bundle(
+    voice: str,
+    device: str,
+    hf_model_id: Optional[str] = None,
+    progress_callback: Optional[Callable[[int, str], None]] = None,
+) -> Dict:
     if not HAS_KOKORO:
         raise RuntimeError(f"kokoro import failed: {KOKORO_IMPORT_ERROR}")
 
     lang_code = voice_to_lang_code(voice)
-    model_cache_key = hf_model_id or "local_default"
+    requested_model_id = normalize_hf_model_id(hf_model_id)
+    model_cache_key = requested_model_id or "local_default"
     cache_key = f"{lang_code}:{device}:{model_cache_key}"
 
     with PIPELINE_LOCK:
@@ -606,35 +796,73 @@ def get_pipeline_bundle(voice: str, device: str, hf_model_id: Optional[str] = No
     model_instance = None
     checkpoint = BASE_DIR / "Kokoro-82M" / "kokoro-v1_0.pth"
     config_file = BASE_DIR / "Kokoro-82M" / "config.json"
+    fallback_reason: Optional[str] = None
 
     if KModel:
-        if hf_model_id:
-            try:
-                model_instance = KModel(repo_id=hf_model_id).to(device).eval()
-            except Exception as exc:
-                logging.exception("Failed to initialize KModel for %s: %s", hf_model_id, exc)
-                model_instance = None
+        if requested_model_id:
+            model_cache_path, download_err = download_hf_model_snapshot(
+                requested_model_id,
+                progress_callback=progress_callback,
+            )
+            if download_err:
+                fallback_reason = download_err
+            elif model_cache_path is not None:
+                custom_config, custom_weights, asset_err = resolve_local_kokoro_assets(model_cache_path)
+                if asset_err:
+                    fallback_reason = asset_err
+                else:
+                    try:
+                        model_instance = KModel(
+                            repo_id=requested_model_id,
+                            config=str(custom_config),
+                            model=str(custom_weights),
+                        ).to(device).eval()
+                    except Exception as exc:
+                        fallback_reason = f"failed to initialize downloaded model ({exc})"
         elif checkpoint.exists() and not is_lfs_pointer(checkpoint):
             config_arg = None
             if config_file.exists() and not is_lfs_pointer(config_file):
                 config_arg = str(config_file)
             model_instance = KModel(config=config_arg, model=str(checkpoint)).to(device).eval()
 
+    if requested_model_id and model_instance is None:
+        reason = fallback_reason or "model could not be initialized"
+        logging.warning(
+            "Falling back to default Kokoro model for '%s' (%s).",
+            requested_model_id,
+            reason,
+        )
+        default_bundle = get_pipeline_bundle(voice, device, hf_model_id=None)
+        with PIPELINE_LOCK:
+            PIPELINE_CACHE[cache_key] = default_bundle
+        return default_bundle
+
     if model_instance is not None:
         pipeline_kwargs: Dict[str, object] = {
             "lang_code": lang_code,
             "model": model_instance,
         }
-        if hf_model_id:
-            pipeline_kwargs["repo_id"] = hf_model_id
-        pipeline = KPipeline(**pipeline_kwargs)
+        if requested_model_id:
+            pipeline_kwargs["repo_id"] = requested_model_id
+        try:
+            pipeline = KPipeline(**pipeline_kwargs)
+        except Exception as exc:
+            if requested_model_id:
+                logging.warning(
+                    "Custom HF model pipeline failed for '%s' (%s). Falling back to default Kokoro model.",
+                    requested_model_id,
+                    exc,
+                )
+                default_bundle = get_pipeline_bundle(voice, device, hf_model_id=None)
+                with PIPELINE_LOCK:
+                    PIPELINE_CACHE[cache_key] = default_bundle
+                return default_bundle
+            raise
     else:
         pipeline_kwargs: Dict[str, object] = {
             "lang_code": lang_code,
             "device": device,
         }
-        if hf_model_id:
-            pipeline_kwargs["repo_id"] = hf_model_id
         try:
             pipeline = KPipeline(**pipeline_kwargs)
         except TypeError:
@@ -1164,6 +1392,23 @@ def run_generation_job(job_id: str) -> None:
             )
             return
 
+        if hf_model_id:
+            update_job(job_id, progress=30, message=f"Preparing download for model '{hf_model_id}'...")
+
+            def report_download_progress(percent: int, message: str) -> None:
+                mapped_progress = 30 + int(max(0, min(100, percent)) * 15 / 100)
+                update_job(job_id, progress=min(45, mapped_progress), message=message)
+                raise_if_stop_requested(job_id, started_at, generated_files)
+
+            get_pipeline_bundle(
+                voice,
+                device,
+                hf_model_id=hf_model_id,
+                progress_callback=report_download_progress,
+            )
+            update_job(job_id, progress=45, message="Model ready. Generating files...")
+            raise_if_stop_requested(job_id, started_at, generated_files)
+
         if mode == "single":
             raise_if_stop_requested(job_id, started_at, generated_files)
             combined_text = "\n\n".join(ch["text"] for ch in chapters)
@@ -1184,7 +1429,9 @@ def run_generation_job(job_id: str) -> None:
                 raise_if_stop_requested(job_id, started_at, generated_files)
                 chapter_slug = slugify(chapter["title"], fallback=f"chapter_{idx:03d}")
                 out_path = run_folder / f"{idx:03d}_{chapter_slug}.wav"
-                progress_start = int(30 + (idx - 1) / total_chapters * 60)
+                base_progress = 45 if hf_model_id else 30
+                progress_span = 45 if hf_model_id else 60
+                progress_start = int(base_progress + (idx - 1) / total_chapters * progress_span)
                 update_job(
                     job_id,
                     progress=progress_start,

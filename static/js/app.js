@@ -6,6 +6,8 @@ const state = {
   chaptersCount: null,
   stopRequestInFlight: false,
   clearRequestInFlight: false,
+  generationRequestInFlight: false,
+  jobStatus: "idle",
   models: [],
   defaultModelId: LOCAL_DEFAULT_MODEL_ID,
   selectedModelId: LOCAL_DEFAULT_MODEL_ID,
@@ -15,6 +17,7 @@ const state = {
 };
 
 const TERMINAL_STATUSES = new Set(["completed", "failed", "stopped"]);
+const ACTIVE_JOB_STATUSES = new Set(["queued", "running", "stopping"]);
 const MODEL_DOWNLOAD_TERMINAL_STATUSES = new Set(["downloaded", "failed", "ready", "not_downloaded"]);
 
 function byId(id) {
@@ -44,6 +47,10 @@ function modelTypeLabel(modelType) {
   if (normalized === "vox") return "Vox";
   if (normalized === "other") return "Other";
   return "Kokoro";
+}
+
+function isActiveJobStatus(status) {
+  return ACTIVE_JOB_STATUSES.has(String(status || "").trim().toLowerCase());
 }
 
 function normalizeModelEntry(rawEntry) {
@@ -175,9 +182,8 @@ function modelReadinessMessage(model) {
 function modelBlocksGeneration() {
   const model = currentSelectedModel();
   if (!model) return true;
-  if (model.id === LOCAL_DEFAULT_MODEL_ID) return false;
-  if (!model.downloaded) return true;
   if (!model.supports_generation) return true;
+  if (model.download_required && !model.downloaded) return true;
   return false;
 }
 
@@ -337,6 +343,12 @@ async function refreshModelDownloadStatus(modelId) {
   if (MODEL_DOWNLOAD_TERMINAL_STATUSES.has(status.status)) {
     stopModelDownloadPolling();
     await refreshModelCatalog(true);
+    // After a model finishes downloading, refresh available voices so selections update.
+    try {
+      await refreshVoicesForSelection();
+    } catch (err) {
+      console.warn("Failed to refresh voices after model download:", err);
+    }
   }
 
   updateJobActions({ can_stop: false, can_clear_files: false, active: false, status: "idle" });
@@ -436,6 +448,12 @@ async function downloadModel() {
     } else {
       stopModelDownloadPolling();
       await refreshModelCatalog(true);
+      // If the download completed immediately, also refresh voices so selection updates.
+      try {
+        await refreshVoicesForSelection();
+      } catch (err) {
+        console.warn("Failed to refresh voices after immediate model download:", err);
+      }
     }
   } catch (error) {
     setModelStatusMessage(error.message || String(error));
@@ -490,7 +508,13 @@ function updateJobActions(statusData) {
 
   const canStop = Boolean(statusData && statusData.can_stop);
   const canClearFiles = Boolean(statusData && statusData.can_clear_files);
-  const isBusy = Boolean(statusData && (statusData.active || statusData.status === "stopping"));
+  const reportedStatus = String((statusData && statusData.status) || state.jobStatus || "idle");
+  const isBusy = Boolean(
+    state.generationRequestInFlight ||
+      (statusData && statusData.active) ||
+      isActiveJobStatus(reportedStatus) ||
+      isActiveJobStatus(state.jobStatus),
+  );
   const blockedByModel = modelBlocksGeneration();
 
   setActionVisibility(stopButton, canStop || state.stopRequestInFlight);
@@ -506,8 +530,34 @@ function updateJobActions(statusData) {
   }
 
   if (generateButton) {
-    generateButton.disabled =
-      !state.jobId || isBusy || state.stopRequestInFlight || state.clearRequestInFlight || blockedByModel;
+    const disabled = !state.jobId || isBusy || state.stopRequestInFlight || state.clearRequestInFlight || blockedByModel;
+    generateButton.disabled = disabled;
+
+    const reasonEl = byId("generateDisabledReason");
+    if (reasonEl) {
+      let reasonText = "";
+      if (disabled) {
+        if (state.generationRequestInFlight) {
+          reasonText = "Starting generation...";
+        } else if (!state.jobId) {
+          reasonText = "Upload an EPUB first — select or drag an EPUB file to begin.";
+        } else if (state.stopRequestInFlight) {
+          reasonText = "Stopping generation — please wait.";
+        } else if (state.clearRequestInFlight) {
+          reasonText = "Clearing generated files — please wait.";
+        } else if (isBusy) {
+          // prefer a server-provided message when available
+          reasonText = (statusData && (statusData.message || statusData.error)) ||
+            "A generation job is active or in progress. Wait until it finishes or stop it.";
+        } else if (blockedByModel) {
+          const model = currentSelectedModel();
+          reasonText = modelReadinessMessage(model);
+        }
+      }
+
+      reasonEl.textContent = reasonText || "";
+      reasonEl.hidden = !reasonText;
+    }
   }
 }
 
@@ -754,6 +804,8 @@ async function refreshJob() {
       throw new Error(filesData.error || "File listing failed");
     }
 
+    state.jobStatus = String(statusData.status || state.jobStatus || "idle");
+
     if (statusData.chapters_count !== null && statusData.chapters_count !== undefined) {
       state.chaptersCount = statusData.chapters_count;
       updateEstimatedFiles();
@@ -771,9 +823,18 @@ async function refreshJob() {
       stopPolling();
     }
   } catch (error) {
+    const preserveActiveState = state.generationRequestInFlight || isActiveJobStatus(state.jobStatus);
     setBadge("failed");
     byId("statusMessage").textContent = error.message;
-    updateJobActions({ can_stop: false, can_clear_files: false, active: false, status: "failed" });
+    if (!preserveActiveState) {
+      state.jobStatus = "failed";
+    }
+    updateJobActions({
+      can_stop: false,
+      can_clear_files: false,
+      active: preserveActiveState,
+      status: preserveActiveState ? state.jobStatus : "failed",
+    });
     stopPolling();
   }
 }
@@ -817,6 +878,7 @@ async function uploadEpubFile(file) {
 
   state.jobId = payload.job_id;
   state.chaptersCount = payload.chapters_count;
+  state.jobStatus = "uploaded";
 
   byId("detectedTitle").textContent = payload.detected_title;
   byId("outputName").value = payload.suggested_name;
@@ -898,6 +960,7 @@ async function generateAudio() {
     throw new Error(result.error || "Failed to start generation");
   }
 
+  state.jobStatus = "queued";
   setBadge("queued");
   byId("statusMessage").textContent = "Generation queued.";
   updateJobActions({ can_stop: false, can_clear_files: false, active: true, status: "queued" });
@@ -950,6 +1013,7 @@ function bindEvents() {
 
   if (generateButton) {
     generateButton.addEventListener("click", async () => {
+      state.generationRequestInFlight = true;
       generateButton.disabled = true;
       try {
         await generateAudio();
@@ -957,7 +1021,8 @@ function bindEvents() {
         byId("statusMessage").textContent = error.message;
         setBadge("failed");
       } finally {
-        updateJobActions({ can_stop: false, can_clear_files: false, active: false, status: "idle" });
+        state.generationRequestInFlight = false;
+        updateJobActions({ can_stop: false, can_clear_files: false, active: isActiveJobStatus(state.jobStatus), status: state.jobStatus || "idle" });
       }
     });
   }

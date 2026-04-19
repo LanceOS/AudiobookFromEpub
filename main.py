@@ -22,9 +22,18 @@ import time
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
+from pathlib import Path as _Path
+import sys as _sys
 from types import SimpleNamespace
 from typing import Callable, Dict, List, Optional, Tuple
 from urllib.parse import urlparse
+
+# Ensure `src/` is on sys.path so moved packages remain importable by their
+# original top-level names (e.g. `core`, `services`, `routes`, `utils`).
+_ROOT = _Path(__file__).resolve().parent
+_SRC = _ROOT / "src"
+if _SRC.exists():
+    _sys.path.insert(0, str(_SRC))
 
 from core.config import (
     ACTIVE_JOB_STATUSES,

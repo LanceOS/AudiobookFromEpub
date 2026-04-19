@@ -5,7 +5,15 @@ import re
 from pathlib import Path
 from typing import Dict, List
 
-BASE_DIR = Path(__file__).resolve().parent.parent
+# Compute repository root (BASE_DIR) robustly so module can live under `src/`.
+p = Path(__file__).resolve()
+if "src" in p.parts:
+    # repo root is the path up to but not including the `src` segment
+    src_index = p.parts.index("src")
+    BASE_DIR = Path(*p.parts[:src_index])
+else:
+    BASE_DIR = p.parents[1]
+
 APP_DATA_DIR = BASE_DIR / ".app_data"
 UPLOADS_DIR = APP_DATA_DIR / "uploads"
 JOB_META_DIR = APP_DATA_DIR / "jobs"

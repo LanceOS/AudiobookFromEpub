@@ -38,8 +38,10 @@ from main import (  # type: ignore[reportMissingImports]
     looks_like_valid_epub,
     maybe_cleanup_stale_data,
     model_voices_for_type,
+    model_download_status,
     normalize_model_type,
     rate_limit_bucket_for_request,
+    start_model_download,
     supports_generation_for_model_type,
     synthesize_text_to_wav,
     should_enable_cleanup,
@@ -158,6 +160,25 @@ class HelperFunctionTests(unittest.TestCase):
         self.assertIn("openbmb/VoxCPM2", by_id)
         self.assertEqual(by_id["hexgrad/Kokoro-82M"].get("model_type"), "kokoro")
         self.assertEqual(by_id["openbmb/VoxCPM2"].get("model_type"), "vox")
+
+    def test_start_model_download_returns_cached_model_without_worker(self) -> None:
+        with app_main.MODEL_DOWNLOADS_LOCK:
+            app_main.MODEL_DOWNLOADS.clear()
+        with app_main.MODEL_DOWNLOAD_WORKERS_LOCK:
+            app_main.MODEL_DOWNLOAD_WORKERS.clear()
+
+        with mock.patch.object(app_main, "is_hf_model_cached", return_value=True):
+            status, started = start_model_download("hexgrad/Kokoro-82M", "kokoro")
+
+        self.assertFalse(started)
+        self.assertEqual(status.get("status"), "downloaded")
+        self.assertTrue(status.get("downloaded"))
+
+    def test_model_download_status_reports_default_model_as_ready(self) -> None:
+        status = model_download_status(app_main.LOCAL_DEFAULT_MODEL_ID)
+        self.assertEqual(status.get("status"), "ready")
+        self.assertTrue(status.get("downloaded"))
+        self.assertFalse(status.get("active_download"))
 
     def test_get_hf_model_cache_path_sanitizes_model_id(self) -> None:
         with mock.patch.object(app_main, "get_hf_model_cache_root", return_value=Path("/tmp/hf-cache")):

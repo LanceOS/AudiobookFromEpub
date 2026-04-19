@@ -8,14 +8,22 @@ import tempfile
 import time
 import unittest
 from io import BytesIO
+from pathlib import Path
+from unittest import mock
 
 os.environ.setdefault("AUDIOBOOK_TEST_MODE", "1")
+
+import main as app_main
 
 from main import (  # type: ignore[reportMissingImports]
     DEFAULT_OUTPUT_DIR,
     JOBS,
     JOBS_LOCK,
     LOCAL_DEFAULT_MODEL_ID,
+    MODEL_DOWNLOADS,
+    MODEL_DOWNLOADS_LOCK,
+    MODEL_DOWNLOAD_WORKERS,
+    MODEL_DOWNLOAD_WORKERS_LOCK,
     RATE_LIMIT_LOCK,
     RATE_LIMIT_STATE,
     WORKERS,
@@ -30,6 +38,10 @@ class ApiRoutesTests(unittest.TestCase):
             JOBS.clear()
         with WORKERS_LOCK:
             WORKERS.clear()
+        with MODEL_DOWNLOADS_LOCK:
+            MODEL_DOWNLOADS.clear()
+        with MODEL_DOWNLOAD_WORKERS_LOCK:
+            MODEL_DOWNLOAD_WORKERS.clear()
         with RATE_LIMIT_LOCK:
             RATE_LIMIT_STATE.clear()
 
@@ -101,6 +113,22 @@ class ApiRoutesTests(unittest.TestCase):
             time.sleep(0.05)
         raise AssertionError(f"job {job_id} did not reach a terminal status")
 
+    def _wait_for_model_download_status(
+        self,
+        model_id: str,
+        expected_status: str,
+        timeout_seconds: float = 4.0,
+    ) -> dict[str, object]:
+        deadline = time.time() + timeout_seconds
+        while time.time() < deadline:
+            response = self.client.get(f"/api/models/download-status?model_id={model_id}")
+            payload = response.get_json(silent=True) or {}
+            status = payload.get("status") or {}
+            if response.status_code == 200 and status.get("status") == expected_status:
+                return status
+            time.sleep(0.05)
+        raise AssertionError(f"model {model_id} did not reach '{expected_status}' status")
+
     def _generate_single_file_job(self) -> tuple[str, str]:
         upload_payload = self._upload_placeholder_epub()
         job_id = str(upload_payload["job_id"])
@@ -161,6 +189,53 @@ class ApiRoutesTests(unittest.TestCase):
         vox_model = by_id["openbmb/VoxCPM2"]
         self.assertEqual(vox_model.get("model_type"), "vox")
         self.assertFalse(vox_model.get("supports_generation"))
+
+    def test_model_download_rejects_invalid_model_id(self) -> None:
+        response = self.client.post(
+            "/api/models/download",
+            json={"model_id": "../../etc/passwd", "model_type": "kokoro"},
+            headers=self._headers(),
+        )
+        payload = response.get_json(silent=True) or {}
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("Hugging Face model ID", str(payload.get("error", "")))
+
+    def test_model_download_starts_and_reports_downloaded_status(self) -> None:
+        def fake_download(model_id: str, progress_callback=None):
+            if progress_callback:
+                progress_callback(20, f"Downloading model '{model_id}'...")
+                progress_callback(100, "Model download complete.")
+            return Path("/tmp/mock-model"), None
+
+        with mock.patch.object(app_main, "is_hf_model_cached", return_value=False), mock.patch.object(
+            app_main,
+            "download_hf_model_snapshot",
+            side_effect=fake_download,
+        ):
+            response = self.client.post(
+                "/api/models/download",
+                json={"model_id": "hexgrad/Kokoro-82M", "model_type": "kokoro"},
+                headers=self._headers(),
+            )
+            payload = response.get_json(silent=True) or {}
+
+            self.assertEqual(response.status_code, 202, payload)
+            self.assertTrue(payload.get("started"))
+
+            status = self._wait_for_model_download_status("hexgrad/Kokoro-82M", "downloaded")
+            self.assertTrue(status.get("downloaded"))
+            self.assertEqual(status.get("progress"), 100)
+            self.assertEqual(status.get("model_type"), "kokoro")
+
+            second = self.client.post(
+                "/api/models/download",
+                json={"model_id": "hexgrad/Kokoro-82M", "model_type": "kokoro"},
+                headers=self._headers(),
+            )
+            second_payload = second.get_json(silent=True) or {}
+            self.assertEqual(second.status_code, 200, second_payload)
+            self.assertFalse(second_payload.get("started"))
 
     def test_upload_rejects_missing_epub_field(self) -> None:
         response = self.client.post(

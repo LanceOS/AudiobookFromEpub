@@ -124,6 +124,10 @@ RATE_LIMIT_LOCK = threading.Lock()
 CLEANUP_LOCK = threading.Lock()
 CLEANUP_LAST_RUN = 0.0
 ACTIVE_JOB_STATUSES = {"queued", "running", "stopping"}
+MODEL_DOWNLOADS: Dict[str, Dict] = {}
+MODEL_DOWNLOADS_LOCK = threading.Lock()
+MODEL_DOWNLOAD_WORKERS: Dict[str, threading.Thread] = {}
+MODEL_DOWNLOAD_WORKERS_LOCK = threading.Lock()
 
 
 class JobStopped(Exception):
@@ -274,6 +278,9 @@ def build_model_catalog_entry(
         "download_required": True,
         "downloaded": downloaded,
         "status": status,
+        "progress": 100 if downloaded else 0,
+        "message": "Model is available locally." if downloaded else "Model is not downloaded yet.",
+        "error": None,
         "supports_generation": supports_generation,
         "voices": model_voices_for_type(normalized_type),
     }
@@ -290,24 +297,163 @@ def local_default_model_entry() -> Dict:
         "download_required": False,
         "downloaded": True,
         "status": "ready",
+        "progress": 100,
+        "message": "Built-in model is ready.",
+        "error": None,
         "supports_generation": True,
         "voices": model_voices_for_type("kokoro"),
     }
 
 
+def find_predefined_model(model_id: str) -> Optional[Dict]:
+    target = str(model_id or "").strip()
+    if not target:
+        return None
+
+    for item in PREDEFINED_MODEL_CATALOG:
+        if str(item.get("id", "")).strip() == target:
+            return dict(item)
+    return None
+
+
+def make_manual_model_entry(model_id: str, model_type: str) -> Dict:
+    normalized_type = normalize_model_type(model_type)
+    downloaded = is_hf_model_cached(model_id)
+    status = "downloaded" if downloaded else "not_downloaded"
+    supports_generation = supports_generation_for_model_type(normalized_type)
+    return {
+        "id": model_id,
+        "display_name": f"Manual model ({model_id})",
+        "model_type": normalized_type,
+        "model_type_label": MODEL_TYPE_LABELS.get(normalized_type, MODEL_TYPE_LABELS["other"]),
+        "description": "User-specified Hugging Face model.",
+        "predefined": False,
+        "download_required": True,
+        "downloaded": downloaded,
+        "status": status,
+        "progress": 100 if downloaded else 0,
+        "message": "Model is available locally." if downloaded else "Model is not downloaded yet.",
+        "error": None,
+        "supports_generation": supports_generation,
+        "voices": model_voices_for_type(normalized_type),
+    }
+
+
+def get_model_download_state(model_id: str) -> Optional[Dict]:
+    with MODEL_DOWNLOADS_LOCK:
+        entry = MODEL_DOWNLOADS.get(model_id)
+        return dict(entry) if entry else None
+
+
+def set_model_download_state(model_id: str, **fields: object) -> Dict:
+    with MODEL_DOWNLOADS_LOCK:
+        current = dict(MODEL_DOWNLOADS.get(model_id) or {})
+        current.update(fields)
+        current["id"] = model_id
+        current["updated_at"] = now_iso()
+        MODEL_DOWNLOADS[model_id] = current
+        return dict(current)
+
+
+def merge_model_download_state(entry: Dict) -> Dict:
+    merged = dict(entry)
+    runtime = get_model_download_state(str(entry.get("id", "")))
+    if not runtime:
+        return merged
+
+    for key in (
+        "display_name",
+        "model_type",
+        "model_type_label",
+        "description",
+        "predefined",
+        "download_required",
+        "downloaded",
+        "status",
+        "progress",
+        "message",
+        "error",
+        "supports_generation",
+        "voices",
+        "updated_at",
+    ):
+        if key in runtime:
+            merged[key] = runtime[key]
+
+    normalized_type = normalize_model_type(merged.get("model_type", "kokoro"))
+    merged["model_type"] = normalized_type
+    merged["model_type_label"] = MODEL_TYPE_LABELS.get(normalized_type, MODEL_TYPE_LABELS["other"])
+    merged["supports_generation"] = supports_generation_for_model_type(normalized_type)
+    merged["voices"] = model_voices_for_type(normalized_type)
+
+    if bool(merged.get("downloaded")):
+        merged["progress"] = 100
+        if str(merged.get("status", "")) in {"not_downloaded", "downloading", "failed", ""}:
+            merged["status"] = "downloaded"
+        if not str(merged.get("message", "")).strip():
+            merged["message"] = "Model is available locally."
+
+    return merged
+
+
 def list_available_models() -> List[Dict]:
     models = [local_default_model_entry()]
+    known_ids = {LOCAL_DEFAULT_MODEL_ID}
+
     for item in PREDEFINED_MODEL_CATALOG:
+        model_id = str(item["id"])
+        known_ids.add(model_id)
         models.append(
             build_model_catalog_entry(
-                str(item["id"]),
+                model_id,
                 str(item["display_name"]),
                 str(item["model_type"]),
                 description=str(item.get("description", "")),
                 predefined=True,
             )
         )
+
+    with MODEL_DOWNLOADS_LOCK:
+        extra_entries = [
+            dict(entry)
+            for model_id, entry in MODEL_DOWNLOADS.items()
+            if model_id not in known_ids and model_id
+        ]
+
+    for entry in extra_entries:
+        model_id = str(entry.get("id", "")).strip()
+        if not model_id:
+            continue
+
+        model_type = normalize_model_type(entry.get("model_type", "kokoro"))
+        manual_entry = make_manual_model_entry(model_id, model_type)
+        manual_entry.update(
+            {
+                "display_name": str(entry.get("display_name") or manual_entry["display_name"]),
+                "description": str(entry.get("description") or manual_entry["description"]),
+                "status": str(entry.get("status") or manual_entry["status"]),
+                "progress": int(entry.get("progress", manual_entry["progress"])),
+                "message": str(entry.get("message") or manual_entry["message"]),
+                "error": entry.get("error"),
+                "downloaded": bool(entry.get("downloaded", manual_entry["downloaded"])),
+            }
+        )
+        models.append(manual_entry)
+
+    models = [merge_model_download_state(entry) for entry in models]
     return models
+
+
+def get_model_catalog_entry(model_id: str, model_type: Optional[str] = None) -> Dict:
+    if model_id == LOCAL_DEFAULT_MODEL_ID:
+        return local_default_model_entry()
+
+    for entry in list_available_models():
+        if str(entry.get("id", "")).strip() == model_id:
+            return dict(entry)
+
+    fallback_type = normalize_model_type(model_type or "kokoro")
+    return make_manual_model_entry(model_id, fallback_type)
 
 
 def get_hf_model_cache_root() -> Path:
@@ -462,6 +608,167 @@ def download_hf_model_snapshot(
 
     emit_progress(100, "Model download complete.")
     return cache_path, None
+
+
+def register_model_download_worker(model_id: str, worker: threading.Thread) -> None:
+    with MODEL_DOWNLOAD_WORKERS_LOCK:
+        MODEL_DOWNLOAD_WORKERS[model_id] = worker
+
+
+def unregister_model_download_worker(model_id: str, worker: Optional[threading.Thread] = None) -> None:
+    with MODEL_DOWNLOAD_WORKERS_LOCK:
+        current = MODEL_DOWNLOAD_WORKERS.get(model_id)
+        if current is None:
+            return
+        if worker is not None and worker is not current:
+            return
+        MODEL_DOWNLOAD_WORKERS.pop(model_id, None)
+
+
+def is_model_download_active(model_id: str) -> bool:
+    with MODEL_DOWNLOAD_WORKERS_LOCK:
+        worker = MODEL_DOWNLOAD_WORKERS.get(model_id)
+        if worker is None:
+            return False
+        if worker.is_alive():
+            return True
+        MODEL_DOWNLOAD_WORKERS.pop(model_id, None)
+        return False
+
+
+def infer_model_type_for_model(model_id: str, fallback: str = "kokoro") -> str:
+    predefined = find_predefined_model(model_id)
+    if predefined:
+        return normalize_model_type(predefined.get("model_type"), default=fallback)
+
+    state_entry = get_model_download_state(model_id)
+    if state_entry:
+        return normalize_model_type(state_entry.get("model_type"), default=fallback)
+
+    return normalize_model_type(fallback)
+
+
+def run_model_download(model_id: str, model_type: str) -> None:
+    try:
+        def report_progress(percent: int, message: str) -> None:
+            set_model_download_state(
+                model_id,
+                progress=max(0, min(100, int(percent))),
+                message=str(message),
+                status="downloading",
+                error=None,
+            )
+
+        cache_path, download_err = download_hf_model_snapshot(model_id, progress_callback=report_progress)
+        if download_err:
+            set_model_download_state(
+                model_id,
+                status="failed",
+                progress=0,
+                downloaded=False,
+                message="Model download failed.",
+                error=download_err,
+                supports_generation=supports_generation_for_model_type(model_type),
+                voices=model_voices_for_type(model_type),
+            )
+            return
+
+        set_model_download_state(
+            model_id,
+            status="downloaded",
+            progress=100,
+            downloaded=True,
+            message="Model download complete.",
+            error=None,
+            cache_path=str(cache_path) if cache_path else None,
+            supports_generation=supports_generation_for_model_type(model_type),
+            voices=model_voices_for_type(model_type),
+        )
+    except Exception as exc:
+        set_model_download_state(
+            model_id,
+            status="failed",
+            progress=0,
+            downloaded=False,
+            message="Model download failed.",
+            error=str(exc),
+            supports_generation=supports_generation_for_model_type(model_type),
+            voices=model_voices_for_type(model_type),
+        )
+    finally:
+        unregister_model_download_worker(model_id)
+
+
+def start_model_download(model_id: str, model_type: str) -> Tuple[Dict, bool]:
+    normalized_type = infer_model_type_for_model(model_id, fallback=model_type)
+    if model_id == LOCAL_DEFAULT_MODEL_ID:
+        return local_default_model_entry(), False
+
+    predefined = find_predefined_model(model_id)
+    if predefined:
+        display_name = str(predefined.get("display_name") or model_id)
+        description = str(predefined.get("description") or "")
+        normalized_type = normalize_model_type(predefined.get("model_type"), default=normalized_type)
+        predefined_flag = True
+    else:
+        display_name = f"Manual model ({model_id})"
+        description = "User-specified Hugging Face model."
+        predefined_flag = False
+
+    if is_hf_model_cached(model_id):
+        cached_entry = make_manual_model_entry(model_id, normalized_type)
+        cached_entry.update(
+            {
+                "display_name": display_name,
+                "description": description,
+                "predefined": predefined_flag,
+                "status": "downloaded",
+                "progress": 100,
+                "downloaded": True,
+                "message": "Model is available locally.",
+                "error": None,
+                "supports_generation": supports_generation_for_model_type(normalized_type),
+                "voices": model_voices_for_type(normalized_type),
+            }
+        )
+        set_model_download_state(model_id, **cached_entry)
+        return get_model_catalog_entry(model_id, normalized_type), False
+
+    existing_state = get_model_download_state(model_id)
+    if existing_state and bool(existing_state.get("downloaded")):
+        return get_model_catalog_entry(model_id, normalized_type), False
+
+    if existing_state and str(existing_state.get("status", "")) == "downloading" and is_model_download_active(model_id):
+        return get_model_catalog_entry(model_id, normalized_type), False
+
+    set_model_download_state(
+        model_id,
+        id=model_id,
+        display_name=display_name,
+        model_type=normalized_type,
+        model_type_label=MODEL_TYPE_LABELS.get(normalized_type, MODEL_TYPE_LABELS["other"]),
+        description=description,
+        predefined=predefined_flag,
+        download_required=True,
+        downloaded=False,
+        status="downloading",
+        progress=0,
+        message=f"Preparing download for model '{model_id}'...",
+        error=None,
+        supports_generation=supports_generation_for_model_type(normalized_type),
+        voices=model_voices_for_type(normalized_type),
+    )
+
+    worker = threading.Thread(target=run_model_download, args=(model_id, normalized_type), daemon=True)
+    register_model_download_worker(model_id, worker)
+    worker.start()
+    return get_model_catalog_entry(model_id, normalized_type), True
+
+
+def model_download_status(model_id: str, model_type: Optional[str] = None) -> Dict:
+    entry = get_model_catalog_entry(model_id, model_type)
+    entry["active_download"] = bool(model_id != LOCAL_DEFAULT_MODEL_ID and is_model_download_active(model_id))
+    return entry
 
 
 def resolve_local_kokoro_assets(model_cache_path: Path) -> Tuple[Optional[Path], Optional[Path], Optional[str]]:
@@ -1723,6 +2030,50 @@ def api_models():
             "models": list_available_models(),
         }
     )
+
+
+@app.post("/api/models/download")
+def api_model_download():
+    ensure_app_dirs()
+    data = request.get_json(silent=True) or {}
+
+    requested_model_id = normalize_hf_model_id(data.get("model_id") or data.get("hf_model_id"))
+    if not requested_model_id:
+        return jsonify({"error": "model_id is required."}), 400
+
+    if requested_model_id == LOCAL_DEFAULT_MODEL_ID:
+        return jsonify({"ok": True, "started": False, "status": model_download_status(requested_model_id)}), 200
+
+    model_id, model_err = validate_hf_model_id(requested_model_id)
+    if model_err:
+        return jsonify({"error": model_err}), 400
+
+    requested_type = normalize_model_type(
+        data.get("model_type"),
+        default=infer_model_type_for_model(str(model_id), fallback="kokoro"),
+    )
+    status, started = start_model_download(str(model_id), requested_type)
+    return jsonify({"ok": True, "started": started, "status": status}), (202 if started else 200)
+
+
+@app.get("/api/models/download-status")
+def api_model_download_status():
+    requested_model_id = normalize_hf_model_id(request.args.get("model_id"))
+    if not requested_model_id:
+        return jsonify({"error": "model_id is required."}), 400
+
+    model_id = requested_model_id
+    if model_id != LOCAL_DEFAULT_MODEL_ID:
+        normalized_model_id, model_err = validate_hf_model_id(model_id)
+        if model_err:
+            return jsonify({"error": model_err}), 400
+        model_id = str(normalized_model_id)
+
+    model_type = normalize_model_type(
+        request.args.get("model_type"),
+        default=infer_model_type_for_model(model_id, fallback="kokoro"),
+    )
+    return jsonify({"ok": True, "status": model_download_status(model_id, model_type)})
 
 
 @app.post("/api/generate")

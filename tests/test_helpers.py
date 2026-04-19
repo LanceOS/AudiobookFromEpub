@@ -142,14 +142,14 @@ class HelperFunctionTests(unittest.TestCase):
 
     def test_normalize_model_type_defaults_unknown_values(self) -> None:
         self.assertEqual(normalize_model_type("kokoro"), "kokoro")
-        self.assertEqual(normalize_model_type("VOX"), "vox")
+        self.assertEqual(normalize_model_type("VOX"), "kokoro")
         self.assertEqual(normalize_model_type("not-real"), "kokoro")
 
     def test_model_voices_for_type_and_generation_support(self) -> None:
         self.assertIn("af_heart", model_voices_for_type("kokoro"))
-        self.assertEqual(model_voices_for_type("vox"), ["vox_default"])
+        self.assertEqual(model_voices_for_type("other"), ["default"])
         self.assertTrue(supports_generation_for_model_type("kokoro"))
-        self.assertFalse(supports_generation_for_model_type("vox"))
+        self.assertFalse(supports_generation_for_model_type("other"))
 
     def test_list_available_models_contains_expected_entries(self) -> None:
         with mock.patch.object(app_main, "is_hf_model_cached", return_value=False):
@@ -158,9 +158,7 @@ class HelperFunctionTests(unittest.TestCase):
         by_id = {str(entry.get("id")): entry for entry in models}
         self.assertIn(app_main.LOCAL_DEFAULT_MODEL_ID, by_id)
         self.assertIn("hexgrad/Kokoro-82M", by_id)
-        self.assertIn("openbmb/VoxCPM2", by_id)
         self.assertEqual(by_id["hexgrad/Kokoro-82M"].get("model_type"), "kokoro")
-        self.assertEqual(by_id["openbmb/VoxCPM2"].get("model_type"), "vox")
 
     def test_start_model_download_returns_cached_model_without_worker(self) -> None:
         with app_main.MODEL_DOWNLOADS_LOCK:
@@ -182,9 +180,9 @@ class HelperFunctionTests(unittest.TestCase):
         self.assertFalse(status.get("active_download"))
 
     def test_model_voice_status_prefers_selected_model_type(self) -> None:
-        payload = model_voice_status(None, "vox")
-        self.assertEqual(payload.get("model_type"), "vox")
-        self.assertEqual(payload.get("voices"), ["vox_default"])
+        payload = model_voice_status(None, "other")
+        self.assertEqual(payload.get("model_type"), "other")
+        self.assertEqual(payload.get("voices"), ["default"])
         self.assertFalse(payload.get("supports_generation"))
 
     def test_model_voice_status_infers_type_for_predefined_model(self) -> None:

@@ -58,7 +58,6 @@
               <label class="field-label" for="modelTypeSelect">Model Type</label>
               <select id="modelTypeSelect" aria-describedby="modelTypeHint">
                 <option value="kokoro">Kokoro</option>
-                <option value="vox">Vox</option>
                 <option value="other">Other</option>
               </select>
               <div id="modelTypeHint" class="field-hint">Choose a type first, then pick a voice from that model.</div>
@@ -83,6 +82,7 @@
                 {% endfor %}
               </select>
               <div id="voiceHint" class="field-hint">Voices are loaded from the selected model type.</div>
+              <div id="voiceRefreshHint" class="field-hint voice-refresh" aria-live="polite" hidden>Refreshing voices…</div>
             </div>
             <div class="form-full">
               <label class="field-label" for="outputDir">Output Directory</label>
@@ -117,6 +117,8 @@
         <button id="generateButton" class="btn-generate" disabled>
           Generate Audiobook
         </button>
+
+        <div id="generateDisabledReason" class="field-hint disabled-reason" aria-live="polite" hidden></div>
 
       </div>
 

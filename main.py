@@ -26,7 +26,6 @@ from types import SimpleNamespace
 from typing import Callable, Dict, List, Optional, Tuple
 from urllib.parse import urlparse
 
-import numpy as np
 from core.config import (
     ACTIVE_JOB_STATUSES,
     ALLOWED_UPLOAD_EXTENSIONS,
@@ -51,6 +50,7 @@ from services.epub_service import (
     extract_chapters_from_epub,
     looks_like_valid_epub,
 )
+from services import synthesis_service
 from services import model_service as model_feature
 from routes.jobs import register_job_routes
 from routes.middleware import register_middleware
@@ -524,110 +524,39 @@ def choose_voice_reference(voice: str) -> str:
     return voice
 
 
+def _synthesis_feature_deps() -> SimpleNamespace:
+    return SimpleNamespace(
+        BASE_DIR=BASE_DIR,
+        HAS_KOKORO=HAS_KOKORO,
+        KModel=KModel,
+        KPipeline=KPipeline,
+        KOKORO_IMPORT_ERROR=KOKORO_IMPORT_ERROR,
+        PIPELINE_CACHE=PIPELINE_CACHE,
+        PIPELINE_LOCK=PIPELINE_LOCK,
+        choose_voice_reference=choose_voice_reference,
+        download_hf_model_snapshot=download_hf_model_snapshot,
+        get_pipeline_bundle=get_pipeline_bundle,
+        is_lfs_pointer=is_lfs_pointer,
+        normalize_hf_model_id=normalize_hf_model_id,
+        resolve_local_kokoro_assets=resolve_local_kokoro_assets,
+        split_text_into_chunks=split_text_into_chunks,
+        voice_to_lang_code=voice_to_lang_code,
+    )
+
+
 def get_pipeline_bundle(
     voice: str,
     device: str,
     hf_model_id: Optional[str] = None,
     progress_callback: Optional[Callable[[int, str], None]] = None,
 ) -> Dict:
-    if not HAS_KOKORO:
-        raise RuntimeError(f"kokoro import failed: {KOKORO_IMPORT_ERROR}")
-
-    lang_code = voice_to_lang_code(voice)
-    requested_model_id = normalize_hf_model_id(hf_model_id)
-    model_cache_key = requested_model_id or "local_default"
-    cache_key = f"{lang_code}:{device}:{model_cache_key}"
-
-    with PIPELINE_LOCK:
-        cached = PIPELINE_CACHE.get(cache_key)
-        if cached:
-            return cached
-
-    model_instance = None
-    checkpoint = BASE_DIR / "Kokoro-82M" / "kokoro-v1_0.pth"
-    config_file = BASE_DIR / "Kokoro-82M" / "config.json"
-    fallback_reason: Optional[str] = None
-
-    if KModel:
-        if requested_model_id:
-            model_cache_path, download_err = download_hf_model_snapshot(
-                requested_model_id,
-                progress_callback=progress_callback,
-            )
-            if download_err:
-                fallback_reason = download_err
-            elif model_cache_path is not None:
-                custom_config, custom_weights, asset_err = resolve_local_kokoro_assets(model_cache_path)
-                if asset_err:
-                    fallback_reason = asset_err
-                else:
-                    try:
-                        model_instance = KModel(
-                            repo_id=requested_model_id,
-                            config=str(custom_config),
-                            model=str(custom_weights),
-                        ).to(device).eval()
-                    except Exception as exc:
-                        fallback_reason = f"failed to initialize downloaded model ({exc})"
-        elif checkpoint.exists() and not is_lfs_pointer(checkpoint):
-            config_arg = None
-            if config_file.exists() and not is_lfs_pointer(config_file):
-                config_arg = str(config_file)
-            model_instance = KModel(config=config_arg, model=str(checkpoint)).to(device).eval()
-
-    if requested_model_id and model_instance is None:
-        reason = fallback_reason or "model could not be initialized"
-        logging.warning(
-            "Falling back to default Kokoro model for '%s' (%s).",
-            requested_model_id,
-            reason,
-        )
-        default_bundle = get_pipeline_bundle(voice, device, hf_model_id=None)
-        with PIPELINE_LOCK:
-            PIPELINE_CACHE[cache_key] = default_bundle
-        return default_bundle
-
-    if model_instance is not None:
-        pipeline_kwargs: Dict[str, object] = {
-            "lang_code": lang_code,
-            "model": model_instance,
-        }
-        if requested_model_id:
-            pipeline_kwargs["repo_id"] = requested_model_id
-        try:
-            pipeline = KPipeline(**pipeline_kwargs)
-        except Exception as exc:
-            if requested_model_id:
-                logging.warning(
-                    "Custom HF model pipeline failed for '%s' (%s). Falling back to default Kokoro model.",
-                    requested_model_id,
-                    exc,
-                )
-                default_bundle = get_pipeline_bundle(voice, device, hf_model_id=None)
-                with PIPELINE_LOCK:
-                    PIPELINE_CACHE[cache_key] = default_bundle
-                return default_bundle
-            raise
-    else:
-        pipeline_kwargs: Dict[str, object] = {
-            "lang_code": lang_code,
-            "device": device,
-        }
-        try:
-            pipeline = KPipeline(**pipeline_kwargs)
-        except TypeError:
-            pipeline_kwargs.pop("device", None)
-            pipeline = KPipeline(**pipeline_kwargs)
-
-    bundle = {
-        "pipeline": pipeline,
-        "model": model_instance,
-    }
-
-    with PIPELINE_LOCK:
-        PIPELINE_CACHE[cache_key] = bundle
-
-    return bundle
+    return synthesis_service.get_pipeline_bundle(
+        voice,
+        device,
+        _synthesis_feature_deps(),
+        hf_model_id=hf_model_id,
+        progress_callback=progress_callback,
+    )
 
 
 def synthesize_text_to_wav(
@@ -637,46 +566,14 @@ def synthesize_text_to_wav(
     device: str = "cpu",
     hf_model_id: Optional[str] = None,
 ) -> None:
-    chunks = split_text_into_chunks(text)
-    if not chunks:
-        raise ValueError("No text chunks available for synthesis.")
-
-    bundle = get_pipeline_bundle(voice, device, hf_model_id=hf_model_id)
-    pipeline = bundle["pipeline"]
-    model = bundle["model"]
-    voice_reference = choose_voice_reference(voice)
-
-    generated_audio: List[np.ndarray] = []
-    for chunk in chunks:
-        if model is not None:
-            generator = pipeline(chunk, voice=voice_reference, model=model)
-        else:
-            generator = pipeline(chunk, voice=voice_reference)
-
-        for result in generator:
-            if hasattr(result, "audio"):
-                audio = result.audio
-            else:
-                audio = result[2]
-
-            if audio is None:
-                continue
-
-            audio_np = np.asarray(audio, dtype=np.float32).flatten()
-            if audio_np.size:
-                generated_audio.append(audio_np)
-
-    if not generated_audio:
-        raise RuntimeError("Kokoro did not return any audio frames.")
-
-    combined = np.concatenate(generated_audio)
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    try:
-        import soundfile as sf  # type: ignore[reportMissingImports]
-    except Exception:
-        raise RuntimeError("soundfile (pysoundfile) is required to write WAV output")
-
-    sf.write(str(output_path), combined, 24000)
+    synthesis_service.synthesize_text_to_wav(
+        text,
+        voice,
+        output_path,
+        _synthesis_feature_deps(),
+        device=device,
+        hf_model_id=hf_model_id,
+    )
 
 
 def _job_feature_deps() -> SimpleNamespace:

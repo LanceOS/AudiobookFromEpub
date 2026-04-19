@@ -245,9 +245,18 @@ async function refreshVoicesForSelection() {
   const model = currentSelectedModel();
   const modelTypeSelect = byId("modelTypeSelect");
   const voiceHint = byId("voiceHint");
+  const voiceRefresh = byId("voiceRefreshHint");
+  const voiceSelect = byId("voiceSelect");
 
   if (!modelTypeSelect) return;
-
+  // Show a small visual cue while voices are being refreshed and disable the select
+  if (voiceRefresh) {
+    voiceRefresh.hidden = false;
+    voiceRefresh.textContent = "Refreshing voices…";
+  }
+  if (voiceSelect) {
+    voiceSelect.disabled = true;
+  }
   const requestedModelType = normalizedModelType(modelTypeSelect.value || (model && model.model_type) || "kokoro");
   const params = new URLSearchParams();
   if (model && model.id) {
@@ -288,6 +297,12 @@ async function refreshVoicesForSelection() {
     if (voiceHint) {
       voiceHint.textContent = error.message || String(error);
     }
+  } finally {
+    // hide the refresh cue; renderVoiceOptions will enable/disable the select as appropriate
+    if (voiceRefresh) {
+      voiceRefresh.hidden = true;
+    }
+  }
   }
 }
 

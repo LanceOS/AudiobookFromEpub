@@ -25,6 +25,7 @@ import uuid
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Callable, Dict, List, Optional, Tuple
 from urllib.parse import urlparse
 
@@ -52,6 +53,11 @@ from services.epub_service import (
     extract_chapters_from_epub,
     looks_like_valid_epub,
 )
+from routes.jobs import register_job_routes
+from routes.middleware import register_middleware
+from routes.models import register_model_routes
+from routes.ui import register_ui_routes
+from routes.upload import register_upload_routes
 from utils.helpers import (
     calculate_elapsed_seconds,
     create_run_folder,
@@ -948,61 +954,6 @@ def is_test_mode() -> bool:
     return str(val).strip().lower() in {"1", "true", "yes", "on"}
 
 
-@app.before_request
-def enforce_api_csrf():
-    if request.method not in {"POST", "PUT", "PATCH", "DELETE"}:
-        return None
-    if not request.path.startswith("/api/"):
-        return None
-
-    if not is_same_origin_request():
-        return jsonify({"error": "Cross-origin requests are not allowed."}), 403
-
-    expected = str(session.get("csrf_token") or "")
-    provided = str(request.headers.get("X-CSRF-Token") or "")
-    if not expected or not provided or not hmac.compare_digest(provided, expected):
-        return jsonify({"error": "Invalid CSRF token."}), 403
-
-    return None
-
-
-@app.before_request
-def enforce_rate_limit():
-    if not request.path.startswith("/api/"):
-        return None
-
-    bucket, limit, window = rate_limit_bucket_for_request()
-    if not bucket:
-        return None
-
-    now = time.time()
-    key = f"{bucket}:{client_identifier()}"
-    with RATE_LIMIT_LOCK:
-        recent = [stamp for stamp in RATE_LIMIT_STATE.get(key, []) if now - stamp < window]
-        if len(recent) >= limit:
-            return jsonify({"error": "Rate limit exceeded. Please retry shortly."}), 429
-        recent.append(now)
-        RATE_LIMIT_STATE[key] = recent
-
-    return None
-
-
-@app.after_request
-def add_security_headers(response):
-    response.headers.setdefault("X-Content-Type-Options", "nosniff")
-    response.headers.setdefault("X-Frame-Options", "DENY")
-    response.headers.setdefault("Referrer-Policy", "no-referrer")
-    response.headers.setdefault("Permissions-Policy", "geolocation=(), microphone=(), camera=()")
-    response.headers.setdefault(
-        "Content-Security-Policy",
-        "default-src 'self'; base-uri 'self'; frame-ancestors 'none'; form-action 'self'; "
-        "img-src 'self' data:; script-src 'self'; style-src 'self'; connect-src 'self'",
-    )
-    if (request.headers.get("X-Forwarded-Proto") or "").strip().lower() == "https":
-        response.headers.setdefault("Strict-Transport-Security", "max-age=31536000; includeSubDomains")
-    return response
-
-
 def choose_voice_reference(voice: str) -> str:
     local_voice = BASE_DIR / "Kokoro-82M" / "voices" / f"{voice}.pt"
     if local_voice.exists() and not is_lfs_pointer(local_voice):
@@ -1493,464 +1444,72 @@ def run_generation_job(job_id: str) -> None:
         unregister_worker(job_id)
 
 
-@app.get("/")
-def index() -> str:
-    ensure_app_dirs()
-    allowed_root, _ = get_allowed_output_root()
-    requested_device = default_requested_device()
-    detected_device = detect_device(requested_device)
-    detected_device_note = device_resolution_note(requested_device, detected_device)
-    return render_template(
-        "index.html",
-        default_output_dir=str(allowed_root or DEFAULT_OUTPUT_DIR),
-        csrf_token=get_csrf_token(),
-        voices=VOICE_OPTIONS,
-        detected_device=detected_device,
-        detected_device_note=detected_device_note,
-    )
-
-
-@app.get("/health")
-def health():
-    return jsonify({"ok": True, "time": now_iso()})
-
-
-@app.post("/api/upload")
-def api_upload():
-    ensure_app_dirs()
-
-    if "epub" not in request.files:
-        return jsonify({"error": "Missing file field 'epub'."}), 400
-
-    incoming = request.files["epub"]
-    if not incoming.filename:
-        return jsonify({"error": "Please choose an EPUB file."}), 400
-
-    filename = secure_filename(incoming.filename)
-    ext = Path(filename).suffix.lower()
-    if ext not in ALLOWED_UPLOAD_EXTENSIONS:
-        return jsonify({"error": "Only .epub files are supported."}), 400
-
-    job_id = uuid.uuid4().hex
-    upload_dir = UPLOADS_DIR / job_id
-    upload_dir.mkdir(parents=True, exist_ok=True)
-    upload_path = upload_dir / "input.epub"
-    incoming.save(upload_path)
-
-    if not is_test_mode() and not looks_like_valid_epub(upload_path):
-        shutil.rmtree(upload_dir, ignore_errors=True)
-        return jsonify({"error": "Invalid EPUB structure."}), 400
-
-    # Ensure `filter_level` is defined even if EPUB parsing fails early
-    filter_level = "default"
-
-    try:
-        detected_title = extract_book_title(upload_path)
-        # Allow clients to request filter level for front/back matter.
-        # Supported values: off, conservative, default, aggressive
-        raw_filter = request.form.get("filter_level")
-        if raw_filter:
-            filter_level = str(raw_filter).lower()
-        else:
-            # Backwards-compatible support for the old boolean flag
-            raw_skip = request.form.get("skip_front_matter")
-            if raw_skip is not None:
-                filter_level = "default" if str(raw_skip).lower() in ("1", "true", "yes", "on") else "off"
-            else:
-                filter_level = "default"
-
-        chapters = extract_chapters_from_epub(upload_path, filter_level=filter_level)
-    except Exception as exc:
-        if is_test_mode():
-            # In test mode, tolerate invalid EPUB bytes and provide a simple fallback
-            detected_title = upload_path.stem
-            chapters = [{"index": "1", "title": "Chapter 1", "text": "Test content."}]
-        else:
-            shutil.rmtree(upload_dir, ignore_errors=True)
-            return jsonify({"error": f"Failed to parse EPUB: {exc}"}), 400
-
-    suggested_name = slugify(detected_title, fallback="audiobook")
-    job_payload = {
-        "id": job_id,
-        "created_at": now_iso(),
-        "updated_at": now_iso(),
-        "status": "uploaded",
-        "progress": 0,
-        "message": "EPUB uploaded. Configure options and generate.",
-        "error": None,
-        "started_at": None,
-        "finished_at": None,
-        "elapsed_seconds": None,
-        "estimated_seconds": None,
-        "upload_path": str(upload_path),
-        "detected_title": detected_title,
-        "chapters_count": len(chapters),
-        "chapters": chapters,
-        "run_folder": None,
-        "generated_files": [],
-        "stop_requested": False,
-        "stop_requested_at": None,
-        "config": {
-            "output_dir": str(DEFAULT_OUTPUT_DIR),
-            "output_name": suggested_name,
-            "mode": "single",
-            "voice": "af_heart",
-            "device": "cpu",
-            "model_id": LOCAL_DEFAULT_MODEL_ID,
-            "model_type": "kokoro",
-            "hf_model_id": None,
-            "filter_level": filter_level,
-        },
-    }
-
-    with JOBS_LOCK:
-        JOBS[job_id] = job_payload
-
-    save_job_snapshot(job_id)
-
-    return jsonify(
-        {
-            "job_id": job_id,
-            "detected_title": detected_title,
-            "suggested_name": suggested_name,
-            "chapters_count": len(chapters),
-        }
-    )
-
-
-@app.get("/api/models")
-def api_models():
-    ensure_app_dirs()
-    return jsonify(
-        {
-            "default_model_id": LOCAL_DEFAULT_MODEL_ID,
-            "default_model_type": "kokoro",
-            "models": list_available_models(),
-        }
-    )
-
-
-@app.post("/api/models/download")
-def api_model_download():
-    ensure_app_dirs()
-    data = request.get_json(silent=True) or {}
-
-    requested_model_id = normalize_hf_model_id(data.get("model_id") or data.get("hf_model_id"))
-    if not requested_model_id:
-        return jsonify({"error": "model_id is required."}), 400
-
-    if requested_model_id == LOCAL_DEFAULT_MODEL_ID:
-        return jsonify({"ok": True, "started": False, "status": model_download_status(requested_model_id)}), 200
-
-    model_id, model_err = validate_hf_model_id(requested_model_id)
-    if model_err:
-        return jsonify({"error": model_err}), 400
-
-    requested_type = normalize_model_type(
-        data.get("model_type"),
-        default=infer_model_type_for_model(str(model_id), fallback="kokoro"),
-    )
-    status, started = start_model_download(str(model_id), requested_type)
-    return jsonify({"ok": True, "started": started, "status": status}), (202 if started else 200)
-
-
-@app.get("/api/models/download-status")
-def api_model_download_status():
-    requested_model_id = normalize_hf_model_id(request.args.get("model_id"))
-    if not requested_model_id:
-        return jsonify({"error": "model_id is required."}), 400
-
-    model_id = requested_model_id
-    if model_id != LOCAL_DEFAULT_MODEL_ID:
-        normalized_model_id, model_err = validate_hf_model_id(model_id)
-        if model_err:
-            return jsonify({"error": model_err}), 400
-        model_id = str(normalized_model_id)
-
-    model_type = normalize_model_type(
-        request.args.get("model_type"),
-        default=infer_model_type_for_model(model_id, fallback="kokoro"),
-    )
-    return jsonify({"ok": True, "status": model_download_status(model_id, model_type)})
-
-
-@app.get("/api/models/voices")
-def api_model_voices():
-    requested_model_id = normalize_hf_model_id(request.args.get("model_id"))
-    if requested_model_id and requested_model_id != LOCAL_DEFAULT_MODEL_ID:
-        normalized_model_id, model_err = validate_hf_model_id(requested_model_id)
-        if model_err:
-            return jsonify({"error": model_err}), 400
-        requested_model_id = str(normalized_model_id)
-
-    requested_model_type = request.args.get("model_type")
-    if requested_model_id and not requested_model_type:
-        requested_model_type = infer_model_type_for_model(requested_model_id, fallback="kokoro")
-
-    payload = model_voice_status(requested_model_id, requested_model_type)
-    return jsonify({"ok": True, "status": payload})
-
-
-@app.post("/api/generate")
-def api_generate():
-    data = request.get_json(silent=True) or {}
-    job_id = str(data.get("job_id", "")).strip()
-    if not job_id:
-        return jsonify({"error": "job_id is required."}), 400
-    if not is_valid_job_id(job_id):
-        return jsonify({"error": "job_id format is invalid."}), 400
-
-    job = get_job(job_id)
-    if not job:
-        return jsonify({"error": "Job not found."}), 404
-
-    if job.get("status") in ACTIVE_JOB_STATUSES:
-        return jsonify({"error": "Job is already active."}), 409
-
-    mode = str(data.get("mode", "single")).strip().lower()
-    if mode not in {"single", "chapter"}:
-        return jsonify({"error": "mode must be 'single' or 'chapter'."}), 400
-
-    if not is_test_mode() and not HAS_KOKORO:
-        return jsonify(
-            {
-                "error": (
-                    "Kokoro is unavailable in this Python environment "
-                    f"({KOKORO_IMPORT_ERROR}). Activate kokoro_venv (Python 3.12) "
-                    "and install requirements, or run in test mode with AUDIOBOOK_TEST_MODE=1."
-                )
-            }
-        ), 400
-
-    output_dir, output_err = validate_output_directory(str(data.get("output_dir", "")))
-    if output_err:
-        return jsonify({"error": output_err}), 400
-
-    output_name = slugify(str(data.get("output_name", "")).strip(), fallback="audiobook")
-
-    requested_model_id = normalize_hf_model_id(data.get("model_id"))
-    requested_hf_model_id = normalize_hf_model_id(data.get("hf_model_id"))
-
-    if requested_model_id == LOCAL_DEFAULT_MODEL_ID:
-        model_id = LOCAL_DEFAULT_MODEL_ID
-    elif requested_model_id:
-        model_id, selected_model_err = validate_hf_model_id(requested_model_id)
-        if selected_model_err:
-            return jsonify({"error": selected_model_err}), 400
-        model_id = str(model_id)
-    elif requested_hf_model_id:
-        model_id, selected_model_err = validate_hf_model_id(requested_hf_model_id)
-        if selected_model_err:
-            return jsonify({"error": selected_model_err}), 400
-        model_id = str(model_id)
-    else:
-        model_id = LOCAL_DEFAULT_MODEL_ID
-
-    default_model_type = "kokoro" if model_id == LOCAL_DEFAULT_MODEL_ID else infer_model_type_for_model(model_id, fallback="kokoro")
-    model_type = normalize_model_type(data.get("model_type"), default=default_model_type)
-
-    voice = str(data.get("voice", "af_heart")).strip() or "af_heart"
-    available_voices = model_voices_for_type(model_type)
-    if voice not in available_voices:
-        return jsonify({"error": f"Unsupported voice for model type '{model_type}'."}), 400
-
-    if not supports_generation_for_model_type(model_type):
-        return jsonify(
-            {
-                "error": (
-                    f"Model type '{model_type}' is currently download/select only. "
-                    "Generation is supported for Kokoro models."
-                )
-            }
-        ), 400
-
-    if model_id != LOCAL_DEFAULT_MODEL_ID:
-        selected_model_status = model_download_status(model_id, model_type)
-        if not bool(selected_model_status.get("downloaded")):
-            return jsonify({"error": "Selected model is not downloaded yet. Download it before generating."}), 400
-
-    hf_model_id = None if model_id == LOCAL_DEFAULT_MODEL_ID else model_id
-
-    estimated_seconds = estimate_generation_seconds(job, mode)
-    requested_device = default_requested_device()
-
-    config = {
-        "output_dir": str(output_dir),
-        "output_name": output_name,
-        "mode": mode,
-        "voice": voice,
-        "device": requested_device,
-        "model_id": model_id,
-        "model_type": model_type,
-        "hf_model_id": hf_model_id,
-    }
-
-    update_job(
-        job_id,
-        status="queued",
-        progress=0,
-        message="Generation queued.",
-        error=None,
-        generated_files=[],
-        run_folder=None,
-        started_at=None,
-        finished_at=None,
-        elapsed_seconds=None,
-        estimated_seconds=estimated_seconds,
-        stop_requested=False,
-        stop_requested_at=None,
-        config=config,
-    )
-
-    worker = threading.Thread(target=run_generation_job, args=(job_id,), daemon=True)
-    register_worker(job_id, worker)
-    worker.start()
-
-    return jsonify({"ok": True, "job_id": job_id})
-
-
-@app.post("/api/jobs/<job_id>/stop")
-def api_job_stop(job_id: str):
-    if not is_valid_job_id(job_id):
-        return jsonify({"error": "job_id format is invalid."}), 400
-
-    job = get_job(job_id)
-    if not job:
-        return jsonify({"error": "Job not found."}), 404
-
-    if job.get("status") in {"completed", "failed"}:
-        return jsonify({"error": "Only active jobs can be stopped."}), 409
-
-    if job.get("status") == "stopped":
-        return jsonify({"ok": True, "job": serialize_job_status(job)})
-
-    if not is_job_active(job_id, job):
-        finalize_stopped_job(job_id, job.get("started_at"), list(job.get("generated_files") or []))
-        stopped_job = get_job(job_id)
-        return jsonify({"ok": True, "job": serialize_job_status(stopped_job or job)})
-
-    if not job.get("stop_requested"):
-        update_job(
-            job_id,
-            stop_requested=True,
-            stop_requested_at=now_iso(),
-            status="stopping",
-            message="Stop requested. Waiting for the current step to finish.",
-            error=None,
-        )
-
-    updated_job = get_job(job_id)
-    return jsonify({"ok": True, "job": serialize_job_status(updated_job or job)})
-
-
-@app.post("/api/jobs/<job_id>/clear-files")
-def api_job_clear_files(job_id: str):
-    if not is_valid_job_id(job_id):
-        return jsonify({"error": "job_id format is invalid."}), 400
-
-    job = get_job(job_id)
-    if not job:
-        return jsonify({"error": "Job not found."}), 404
-
-    if job.get("status") != "stopped":
-        return jsonify({"error": "Only stopped jobs can clear generated files."}), 409
-
-    if is_job_active(job_id, job):
-        return jsonify({"error": "Stop is still in progress. Wait for the job to finish stopping."}), 409
-
-    files = list_generated_files(job)
-    run_folder = str(job.get("run_folder") or "").strip()
-    if not run_folder and not files and not job.get("generated_files"):
-        update_job(job_id, message="Generated files were already cleared.")
-        refreshed = get_job(job_id)
-        return jsonify({"ok": True, "job": serialize_job_status(refreshed or job), "files_cleared": []})
-
-    run_path = Path(run_folder).resolve(strict=False) if run_folder else None
-    if run_path:
-        shutil.rmtree(run_path, ignore_errors=True)
-
-    cleared_names = [entry["name"] for entry in files] or list(job.get("generated_files") or [])
-    update_job(
-        job_id,
-        run_folder=None,
-        generated_files=[],
-        message="Generated files cleared.",
-        error=None,
-    )
-
-    refreshed = get_job(job_id)
-    return jsonify({"ok": True, "job": serialize_job_status(refreshed or job), "files_cleared": cleared_names})
-
-
-@app.get("/api/jobs/<job_id>/status")
-def api_job_status(job_id: str):
-    if not is_valid_job_id(job_id):
-        return jsonify({"error": "job_id format is invalid."}), 400
-
-    job = get_job(job_id)
-    if not job:
-        return jsonify({"error": "Job not found."}), 404
-
-    return jsonify(serialize_job_status(job))
-
-
-@app.get("/api/jobs/<job_id>/files")
-def api_job_files(job_id: str):
-    if not is_valid_job_id(job_id):
-        return jsonify({"error": "job_id format is invalid."}), 400
-
-    job = get_job(job_id)
-    if not job:
-        return jsonify({"error": "Job not found."}), 404
-
-    files = list_generated_files(job)
-    update_job(job_id, generated_files=[f["name"] for f in files])
-
-    refreshed = get_job(job_id)
-    return jsonify(
-        {
-            "job_id": job_id,
-            "files": files,
-            "can_clear_files": can_clear_job_files(refreshed or job),
-            "files_cleared": job_files_cleared(refreshed or job),
-        }
-    )
-
-
-@app.get("/api/jobs/<job_id>/file/<path:filename>")
-def api_job_file(job_id: str, filename: str):
-    if not is_valid_job_id(job_id):
-        return jsonify({"error": "job_id format is invalid."}), 400
-
-    job = get_job(job_id)
-    if not job:
-        return jsonify({"error": "Job not found."}), 404
-
-    safe_name, file_err = validate_generated_file_request(job, filename)
-    if file_err:
-        status = 404 if file_err in {"File not found.", "No generated files for this job yet."} else 400
-        return jsonify({"error": file_err}), status
-
-    run_folder = str(job["run_folder"])
-    return send_from_directory(str(Path(run_folder).resolve(strict=False)), safe_name, as_attachment=False)
-
-
-@app.get("/api/jobs/<job_id>/download/<path:filename>")
-def api_job_download(job_id: str, filename: str):
-    if not is_valid_job_id(job_id):
-        return jsonify({"error": "job_id format is invalid."}), 400
-
-    job = get_job(job_id)
-    if not job:
-        return jsonify({"error": "Job not found."}), 404
-
-    safe_name, file_err = validate_generated_file_request(job, filename)
-    if file_err:
-        status = 404 if file_err in {"File not found.", "No generated files for this job yet."} else 400
-        return jsonify({"error": file_err}), status
-
-    run_folder = str(job["run_folder"])
-    return send_from_directory(str(Path(run_folder).resolve(strict=False)), safe_name, as_attachment=True)
+ROUTE_DEPS = SimpleNamespace(
+    ALLOWED_UPLOAD_EXTENSIONS=ALLOWED_UPLOAD_EXTENSIONS,
+    ACTIVE_JOB_STATUSES=ACTIVE_JOB_STATUSES,
+    DEFAULT_OUTPUT_DIR=DEFAULT_OUTPUT_DIR,
+    HAS_KOKORO=HAS_KOKORO,
+    JOBS=JOBS,
+    JOBS_LOCK=JOBS_LOCK,
+    KOKORO_IMPORT_ERROR=KOKORO_IMPORT_ERROR,
+    LOCAL_DEFAULT_MODEL_ID=LOCAL_DEFAULT_MODEL_ID,
+    RATE_LIMIT_LOCK=RATE_LIMIT_LOCK,
+    RATE_LIMIT_STATE=RATE_LIMIT_STATE,
+    UPLOADS_DIR=UPLOADS_DIR,
+    VOICE_OPTIONS=VOICE_OPTIONS,
+    can_clear_job_files=can_clear_job_files,
+    client_identifier=client_identifier,
+    default_requested_device=default_requested_device,
+    detect_device=detect_device,
+    device_resolution_note=device_resolution_note,
+    ensure_app_dirs=ensure_app_dirs,
+    estimate_generation_seconds=estimate_generation_seconds,
+    extract_book_title=extract_book_title,
+    extract_chapters_from_epub=extract_chapters_from_epub,
+    finalize_stopped_job=finalize_stopped_job,
+    get_allowed_output_root=get_allowed_output_root,
+    get_csrf_token=get_csrf_token,
+    get_job=get_job,
+    infer_model_type_for_model=infer_model_type_for_model,
+    is_job_active=is_job_active,
+    is_same_origin_request=is_same_origin_request,
+    is_test_mode=is_test_mode,
+    is_valid_job_id=is_valid_job_id,
+    job_files_cleared=job_files_cleared,
+    jsonify=jsonify,
+    list_available_models=list_available_models,
+    list_generated_files=list_generated_files,
+    looks_like_valid_epub=looks_like_valid_epub,
+    model_download_status=model_download_status,
+    model_voice_status=model_voice_status,
+    model_voices_for_type=model_voices_for_type,
+    normalize_hf_model_id=normalize_hf_model_id,
+    normalize_model_type=normalize_model_type,
+    now_iso=now_iso,
+    rate_limit_bucket_for_request=rate_limit_bucket_for_request,
+    register_worker=register_worker,
+    render_template=render_template,
+    request=request,
+    run_generation_job=run_generation_job,
+    save_job_snapshot=save_job_snapshot,
+    secure_filename=secure_filename,
+    send_from_directory=send_from_directory,
+    serialize_job_status=serialize_job_status,
+    session=session,
+    slugify=slugify,
+    start_model_download=start_model_download,
+    supports_generation_for_model_type=supports_generation_for_model_type,
+    update_job=update_job,
+    validate_generated_file_request=validate_generated_file_request,
+    validate_hf_model_id=validate_hf_model_id,
+    validate_output_directory=validate_output_directory,
+)
+
+register_middleware(app, ROUTE_DEPS)
+register_ui_routes(app, ROUTE_DEPS)
+register_upload_routes(app, ROUTE_DEPS)
+register_model_routes(app, ROUTE_DEPS)
+register_job_routes(app, ROUTE_DEPS)
 
 
 def parse_args() -> argparse.Namespace:

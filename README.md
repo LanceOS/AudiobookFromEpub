@@ -8,6 +8,12 @@ Localhost web app that converts an EPUB into audiobook WAV output using Kokoro T
 - EPUB drag-and-drop upload.
 - Auto-detects title and lets you rename output filename.
 - Choose output directory (validated server-side).
+- Built-in model manager with predefined downloadable models:
+  - `hexgrad/Kokoro-82M`
+  - `openbmb/VoxCPM2`
+- Download models before generation and track download progress in the UI.
+- Manual Hugging Face model ID entry is supported alongside predefined model choices.
+- Select model type (`Kokoro`, `Vox`, `Other`) and then select a voice from that model type.
 - Generate either:
   - one large audio file, or
   - one audio file per chapter.
@@ -47,13 +53,24 @@ Open:
 ## UI Workflow
 
 1. Drop or choose an EPUB file.
-2. Confirm detected title and optionally edit filename.
-3. Set output directory.
-4. Choose generation mode:
+2. In **Settings**, choose a model from the catalog (Kokoro is default), or enter a manual Hugging Face model ID.
+3. Select model type, then click **Download Model** for any non-default model.
+4. Wait for download status to show the model is ready.
+5. Confirm detected title and optionally edit filename.
+6. Set output directory.
+7. Choose generation mode:
    - single file
    - per chapter
-5. Click **Generate Audio**.
-6. Watch status and view generated files in the output panel.
+8. Choose a voice from the selected model type.
+9. Click **Generate Audio**.
+10. Watch status and view generated files in the output panel.
+
+## Model Support Notes
+
+- `Kokoro` models are supported for generation.
+- `Vox` models are currently supported for download and selection only.
+- If you select a `Vox` model for generation, the API returns a clear unsupported-model-type error.
+- Generation requires the selected non-default model to be downloaded first.
 
 ## Smoke Test
 

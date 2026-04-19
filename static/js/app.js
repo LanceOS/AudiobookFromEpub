@@ -302,7 +302,6 @@ async function refreshVoicesForSelection() {
       voiceRefresh.hidden = true;
     }
   }
-  }
 }
 
 async function syncModelControlsFromSelection() {

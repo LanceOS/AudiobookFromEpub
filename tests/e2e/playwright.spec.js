@@ -264,7 +264,7 @@ test.describe('EPUB to Audiobook UI', () => {
     const generateButton = page.locator('#generateButton');
     await expect(generateButton).toBeEnabled();
 
-    await page.selectOption('#modelTypeSelect', 'vox');
+    await page.selectOption('#modelTypeSelect', 'other');
     await expect(page.locator('#voiceHint')).toContainText('download/select only');
     await expect(generateButton).toBeDisabled();
     await expect(page.locator('#generateDisabledReason')).toContainText('download/select only');

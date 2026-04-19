@@ -157,22 +157,11 @@ def get_allowed_output_root() -> Tuple[Optional[Path], Optional[str]]:
 def validate_output_directory(path_text: str) -> Tuple[Optional[Path], Optional[str]]:
     if not path_text or not str(path_text).strip():
         return None, "Output directory is required."
-
-    allowed_root, root_err = get_allowed_output_root()
-    if root_err or not allowed_root:
-        return None, root_err or "Unable to resolve allowed output root."
-
     output_dir = Path(path_text).expanduser()
     try:
         resolved_output = output_dir.resolve(strict=False)
     except Exception as exc:
         return None, f"Invalid output directory path: {exc}"
-
-    try:
-        resolved_output.relative_to(allowed_root)
-    except ValueError:
-        return None, f"Output directory must be inside allowed root: {allowed_root}"
-
     try:
         resolved_output.mkdir(parents=True, exist_ok=True)
     except Exception as exc:
@@ -620,7 +609,11 @@ def get_pipeline_bundle(voice: str, device: str, hf_model_id: Optional[str] = No
 
     if KModel:
         if hf_model_id:
-            model_instance = KModel(repo_id=hf_model_id).to(device).eval()
+            try:
+                model_instance = KModel(repo_id=hf_model_id).to(device).eval()
+            except Exception as exc:
+                logging.exception("Failed to initialize KModel for %s: %s", hf_model_id, exc)
+                model_instance = None
         elif checkpoint.exists() and not is_lfs_pointer(checkpoint):
             config_arg = None
             if config_file.exists() and not is_lfs_pointer(config_file):
@@ -1495,15 +1488,7 @@ def api_job_clear_files(job_id: str):
         return jsonify({"ok": True, "job": serialize_job_status(refreshed or job), "files_cleared": []})
 
     run_path = Path(run_folder).resolve(strict=False) if run_folder else None
-    allowed_root, root_err = get_allowed_output_root()
-    if root_err or not allowed_root:
-        return jsonify({"error": root_err or "Unable to resolve allowed output root."}), 500
-
     if run_path:
-        try:
-            run_path.relative_to(allowed_root)
-        except ValueError:
-            return jsonify({"error": "Run folder is outside the allowed output root."}), 400
         shutil.rmtree(run_path, ignore_errors=True)
 
     cleared_names = [entry["name"] for entry in files] or list(job.get("generated_files") or [])

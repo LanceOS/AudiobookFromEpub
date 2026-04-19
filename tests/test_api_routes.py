@@ -211,13 +211,14 @@ class ApiRoutesTests(unittest.TestCase):
         self.assertEqual(response.status_code, 400)
         self.assertIn("Unsupported voice", str(payload.get("error", "")))
 
-    def test_generate_rejects_output_directory_outside_allowed_root(self) -> None:
+    def test_generate_accepts_output_directory_outside_allowed_root(self) -> None:
         upload_payload = self._upload_placeholder_epub()
+        job_id = upload_payload["job_id"]
 
         response = self.client.post(
             "/api/generate",
             json={
-                "job_id": upload_payload["job_id"],
+                "job_id": job_id,
                 "output_dir": "/tmp",
                 "output_name": "outside-root",
                 "mode": "single",
@@ -226,9 +227,10 @@ class ApiRoutesTests(unittest.TestCase):
             headers=self._headers(),
         )
         payload = response.get_json(silent=True) or {}
+        self.assertEqual(response.status_code, 200, payload)
 
-        self.assertEqual(response.status_code, 400)
-        self.assertIn("inside allowed root", str(payload.get("error", "")))
+        final_status = self._wait_for_terminal_status(job_id)
+        self.assertEqual(final_status.get("status"), "completed", final_status)
 
     def test_generate_rejects_invalid_hf_model_id(self) -> None:
         upload_payload = self._upload_placeholder_epub()

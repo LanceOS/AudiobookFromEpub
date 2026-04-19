@@ -110,8 +110,9 @@ class HelperFunctionTests(unittest.TestCase):
             with mock.patch.dict(os.environ, {"AUDIOBOOK_ALLOWED_OUTPUT_ROOT": allowed_root}, clear=False):
                 output_dir, error = validate_output_directory(outside_root)
 
-            self.assertIsNone(output_dir)
-            self.assertIn("inside allowed root", str(error))
+            self.assertIsNone(error)
+            self.assertEqual(Path(outside_root).resolve(), Path(str(output_dir)).resolve())
+            self.assertTrue(Path(outside_root).exists())
 
     def test_validate_output_directory_requires_non_empty_value(self) -> None:
         output_dir, error = validate_output_directory("")

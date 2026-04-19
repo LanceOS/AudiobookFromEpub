@@ -14,6 +14,7 @@ const state = {
   modelDownloadPollTimer: null,
   modelDownloadTargetId: null,
   modelDownloadInFlight: false,
+  defaultVoiceOptions: [],
 };
 
 const TERMINAL_STATUSES = new Set(["completed", "failed", "stopped"]);
@@ -100,6 +101,14 @@ function upsertModelEntry(entry) {
 
 function currentSelectedModel() {
   return state.models.find((model) => model.id === state.selectedModelId) || null;
+}
+
+function captureDefaultVoiceOptions() {
+  const voiceSelect = byId("voiceSelect");
+  if (!voiceSelect) return [];
+  return Array.from(voiceSelect.options)
+    .map((option) => String(option.value || option.textContent || "").trim())
+    .filter(Boolean);
 }
 
 function setModelStatusMessage(message) {
@@ -245,62 +254,33 @@ async function refreshVoicesForSelection() {
   const modelTypeSelect = byId("modelTypeSelect");
   const voiceHint = byId("voiceHint");
   const voiceRefresh = byId("voiceRefreshHint");
-  const voiceSelect = byId("voiceSelect");
 
   if (!modelTypeSelect) return;
-  // Show a small visual cue while voices are being refreshed and disable the select
-  if (voiceRefresh) {
-    voiceRefresh.hidden = false;
-    voiceRefresh.textContent = "Refreshing voices…";
-  }
-  if (voiceSelect) {
-    voiceSelect.disabled = true;
-  }
   const requestedModelType = normalizedModelType(modelTypeSelect.value || (model && model.model_type) || "kokoro");
-  const params = new URLSearchParams();
-  if (model && model.id) {
-    params.set("model_id", model.id);
+  const voices = requestedModelType === "kokoro" ? state.defaultVoiceOptions : ["default"];
+  renderVoiceOptions(voices);
+
+  if (model) {
+    upsertModelEntry({
+      ...model,
+      model_type: requestedModelType,
+      model_type_label: modelTypeLabel(requestedModelType),
+      voices,
+      supports_generation: requestedModelType === "kokoro",
+    });
   }
-  params.set("model_type", requestedModelType);
 
-  try {
-    const response = await fetch(`/api/models/voices?${params.toString()}`);
-    const payload = await response.json();
-    if (!response.ok) {
-      throw new Error(payload.error || "Failed to load model voices");
+  if (voiceHint) {
+    if (requestedModelType === "kokoro") {
+      voiceHint.textContent = "Voices are loaded from the selected model.";
+    } else {
+      voiceHint.textContent =
+        "Selected model type is download/select only right now. Generation currently supports Kokoro models.";
     }
+  }
 
-    const status = payload.status || {};
-    const voices = Array.isArray(status.voices) ? status.voices : [];
-    renderVoiceOptions(voices);
-
-    if (model) {
-      upsertModelEntry({
-        ...model,
-        model_type: normalizedModelType(status.model_type || requestedModelType),
-        voices,
-        supports_generation: Boolean(status.supports_generation),
-      });
-    }
-
-    if (voiceHint) {
-      if (status.supports_generation) {
-        voiceHint.textContent = "Voices are loaded from the selected model.";
-      } else {
-        voiceHint.textContent =
-          "Selected model type is download/select only right now. Generation currently supports Kokoro models.";
-      }
-    }
-  } catch (error) {
-    renderVoiceOptions([]);
-    if (voiceHint) {
-      voiceHint.textContent = error.message || String(error);
-    }
-  } finally {
-    // hide the refresh cue; renderVoiceOptions will enable/disable the select as appropriate
-    if (voiceRefresh) {
-      voiceRefresh.hidden = true;
-    }
+  if (voiceRefresh) {
+    voiceRefresh.hidden = true;
   }
 }
 
@@ -356,6 +336,21 @@ async function refreshModelDownloadStatus(modelId) {
   if (MODEL_DOWNLOAD_TERMINAL_STATUSES.has(status.status)) {
     stopModelDownloadPolling();
     await refreshModelCatalog(true);
+    // Ensure a model that just finished downloading is present in the selector
+    // and selected so the UI updates deterministically.
+    try {
+      if (status && status.id) {
+        const found = state.models.some((m) => m.id === status.id);
+        if (found) {
+          state.selectedModelId = status.id;
+          renderModelOptions();
+          await syncModelControlsFromSelection();
+        }
+      }
+    } catch (err) {
+      console.warn("Failed to select downloaded model:", err);
+    }
+
     // After a model finishes downloading, refresh available voices so selections update.
     try {
       await refreshVoicesForSelection();
@@ -461,6 +456,19 @@ async function downloadModel() {
     } else {
       stopModelDownloadPolling();
       await refreshModelCatalog(true);
+      // Ensure the immediate download result is reflected in the selector.
+      try {
+        if (status && status.id) {
+          const found = state.models.some((m) => m.id === status.id);
+          if (found) {
+            state.selectedModelId = status.id;
+            renderModelOptions();
+            await syncModelControlsFromSelection();
+          }
+        }
+      } catch (err) {
+        console.warn("Failed to select downloaded model after immediate completion:", err);
+      }
       // If the download completed immediately, also refresh voices so selection updates.
       try {
         await refreshVoicesForSelection();
@@ -1118,6 +1126,7 @@ function bindEvents() {
 
 async function initializeApp() {
   bindEvents();
+  state.defaultVoiceOptions = captureDefaultVoiceOptions();
   await refreshModelCatalog(false);
   renderFiles([]);
 }

@@ -1690,6 +1690,8 @@ def serialize_job_status(job: Dict) -> Dict:
         "estimated_seconds": job.get("estimated_seconds"),
         "device": job.get("device") or job.get("config", {}).get("device", "auto"),
         "hf_model_id": job.get("config", {}).get("hf_model_id"),
+        "model_id": job.get("config", {}).get("model_id") or LOCAL_DEFAULT_MODEL_ID,
+        "model_type": job.get("config", {}).get("model_type") or "kokoro",
         "detected_title": job["detected_title"],
         "chapters_count": job["chapters_count"],
         "run_folder": job["run_folder"],
@@ -2020,6 +2022,8 @@ def api_upload():
             "mode": "single",
             "voice": "af_heart",
             "device": "cpu",
+            "model_id": LOCAL_DEFAULT_MODEL_ID,
+            "model_type": "kokoro",
             "hf_model_id": None,
             "filter_level": filter_level,
         },
@@ -2149,13 +2153,49 @@ def api_generate():
         return jsonify({"error": output_err}), 400
 
     output_name = slugify(str(data.get("output_name", "")).strip(), fallback="audiobook")
-    voice = str(data.get("voice", "af_heart")).strip() or "af_heart"
-    if voice not in VOICE_OPTIONS:
-        return jsonify({"error": "Unsupported voice."}), 400
 
-    hf_model_id, model_err = validate_hf_model_id(data.get("hf_model_id"))
-    if model_err:
-        return jsonify({"error": model_err}), 400
+    requested_model_id = normalize_hf_model_id(data.get("model_id"))
+    requested_hf_model_id = normalize_hf_model_id(data.get("hf_model_id"))
+
+    if requested_model_id == LOCAL_DEFAULT_MODEL_ID:
+        model_id = LOCAL_DEFAULT_MODEL_ID
+    elif requested_model_id:
+        model_id, selected_model_err = validate_hf_model_id(requested_model_id)
+        if selected_model_err:
+            return jsonify({"error": selected_model_err}), 400
+        model_id = str(model_id)
+    elif requested_hf_model_id:
+        model_id, selected_model_err = validate_hf_model_id(requested_hf_model_id)
+        if selected_model_err:
+            return jsonify({"error": selected_model_err}), 400
+        model_id = str(model_id)
+    else:
+        model_id = LOCAL_DEFAULT_MODEL_ID
+
+    default_model_type = "kokoro" if model_id == LOCAL_DEFAULT_MODEL_ID else infer_model_type_for_model(model_id, fallback="kokoro")
+    model_type = normalize_model_type(data.get("model_type"), default=default_model_type)
+
+    voice = str(data.get("voice", "af_heart")).strip() or "af_heart"
+    available_voices = model_voices_for_type(model_type)
+    if voice not in available_voices:
+        return jsonify({"error": f"Unsupported voice for model type '{model_type}'."}), 400
+
+    if not supports_generation_for_model_type(model_type):
+        return jsonify(
+            {
+                "error": (
+                    f"Model type '{model_type}' is currently download/select only. "
+                    "Generation is supported for Kokoro models."
+                )
+            }
+        ), 400
+
+    if model_id != LOCAL_DEFAULT_MODEL_ID:
+        selected_model_status = model_download_status(model_id, model_type)
+        if not bool(selected_model_status.get("downloaded")):
+            return jsonify({"error": "Selected model is not downloaded yet. Download it before generating."}), 400
+
+    hf_model_id = None if model_id == LOCAL_DEFAULT_MODEL_ID else model_id
 
     estimated_seconds = estimate_generation_seconds(job, mode)
     requested_device = default_requested_device()
@@ -2166,6 +2206,8 @@ def api_generate():
         "mode": mode,
         "voice": voice,
         "device": requested_device,
+        "model_id": model_id,
+        "model_type": model_type,
         "hf_model_id": hf_model_id,
     }
 

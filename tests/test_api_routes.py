@@ -385,24 +385,69 @@ class ApiRoutesTests(unittest.TestCase):
         self.assertEqual(response.status_code, 400)
         self.assertIn("Hugging Face model ID", str(payload.get("error", "")))
 
+    def test_generate_rejects_model_that_is_not_downloaded(self) -> None:
+        upload_payload = self._upload_placeholder_epub()
+
+        with mock.patch.object(app_main, "is_hf_model_cached", return_value=False):
+            response = self.client.post(
+                "/api/generate",
+                json={
+                    "job_id": upload_payload["job_id"],
+                    "output_dir": str(DEFAULT_OUTPUT_DIR),
+                    "output_name": "missing-download",
+                    "mode": "single",
+                    "voice": "af_heart",
+                    "model_id": "hexgrad/Kokoro-82M",
+                    "model_type": "kokoro",
+                },
+                headers=self._headers(),
+            )
+
+        payload = response.get_json(silent=True) or {}
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("not downloaded", str(payload.get("error", "")))
+
+    def test_generate_rejects_unsupported_vox_model_type(self) -> None:
+        upload_payload = self._upload_placeholder_epub()
+
+        with mock.patch.object(app_main, "is_hf_model_cached", return_value=True):
+            response = self.client.post(
+                "/api/generate",
+                json={
+                    "job_id": upload_payload["job_id"],
+                    "output_dir": str(DEFAULT_OUTPUT_DIR),
+                    "output_name": "vox-unsupported",
+                    "mode": "single",
+                    "voice": "vox_default",
+                    "model_id": "openbmb/VoxCPM2",
+                    "model_type": "vox",
+                },
+                headers=self._headers(),
+            )
+
+        payload = response.get_json(silent=True) or {}
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("download/select only", str(payload.get("error", "")))
+
     def test_generate_accepts_hf_model_id_and_stores_it(self) -> None:
         upload_payload = self._upload_placeholder_epub()
         output_dir = self._new_output_dir()
         model_id = "hexgrad/Kokoro-82M"
         job_id = str(upload_payload["job_id"])
 
-        response = self.client.post(
-            "/api/generate",
-            json={
-                "job_id": job_id,
-                "output_dir": output_dir,
-                "output_name": "model-id",
-                "mode": "single",
-                "voice": "af_heart",
-                "hf_model_id": model_id,
-            },
-            headers=self._headers(),
-        )
+        with mock.patch.object(app_main, "is_hf_model_cached", return_value=True):
+            response = self.client.post(
+                "/api/generate",
+                json={
+                    "job_id": job_id,
+                    "output_dir": output_dir,
+                    "output_name": "model-id",
+                    "mode": "single",
+                    "voice": "af_heart",
+                    "hf_model_id": model_id,
+                },
+                headers=self._headers(),
+            )
         payload = response.get_json(silent=True) or {}
         self.assertEqual(response.status_code, 200, payload)
 
@@ -411,6 +456,8 @@ class ApiRoutesTests(unittest.TestCase):
 
         with JOBS_LOCK:
             self.assertEqual(JOBS[job_id]["config"].get("hf_model_id"), model_id)
+            self.assertEqual(JOBS[job_id]["config"].get("model_id"), model_id)
+            self.assertEqual(JOBS[job_id]["config"].get("model_type"), "kokoro")
 
     def test_file_route_streams_audio_and_download_route_sets_attachment(self) -> None:
         job_id, filename = self._generate_single_file_job()

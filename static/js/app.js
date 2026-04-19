@@ -1,12 +1,21 @@
+const LOCAL_DEFAULT_MODEL_ID = "__local_kokoro_default__";
+
 const state = {
   jobId: null,
   pollTimer: null,
   chaptersCount: null,
   stopRequestInFlight: false,
   clearRequestInFlight: false,
+  models: [],
+  defaultModelId: LOCAL_DEFAULT_MODEL_ID,
+  selectedModelId: LOCAL_DEFAULT_MODEL_ID,
+  modelDownloadPollTimer: null,
+  modelDownloadTargetId: null,
+  modelDownloadInFlight: false,
 };
 
 const TERMINAL_STATUSES = new Set(["completed", "failed", "stopped"]);
+const MODEL_DOWNLOAD_TERMINAL_STATUSES = new Set(["downloaded", "failed", "ready", "not_downloaded"]);
 
 function byId(id) {
   return document.getElementById(id);
@@ -22,14 +31,422 @@ function selectedMode() {
   return option ? option.value : "single";
 }
 
-function syncVoiceSelectionState() {
-  const voiceSelect = byId("voiceSelect");
-  const hfModelInput = byId("hfModelId");
-  if (!voiceSelect || !hfModelInput) return;
+function normalizedModelType(rawValue) {
+  const value = String(rawValue || "").trim().toLowerCase();
+  if (["kokoro", "vox", "other"].includes(value)) {
+    return value;
+  }
+  return "kokoro";
+}
 
-  const hasCustomModel = Boolean(hfModelInput.value && hfModelInput.value.trim());
-  voiceSelect.disabled = hasCustomModel;
-  voiceSelect.setAttribute("aria-disabled", hasCustomModel ? "true" : "false");
+function modelTypeLabel(modelType) {
+  const normalized = normalizedModelType(modelType);
+  if (normalized === "vox") return "Vox";
+  if (normalized === "other") return "Other";
+  return "Kokoro";
+}
+
+function normalizeModelEntry(rawEntry) {
+  const modelId = String((rawEntry && rawEntry.id) || "").trim();
+  const modelType = normalizedModelType(rawEntry && rawEntry.model_type);
+  const status = String((rawEntry && rawEntry.status) || "not_downloaded").trim() || "not_downloaded";
+  const downloaded =
+    Boolean(rawEntry && rawEntry.downloaded) || status === "downloaded" || status === "ready";
+  const progress = Math.max(0, Math.min(100, Number((rawEntry && rawEntry.progress) || (downloaded ? 100 : 0))));
+  const supportsGeneration =
+    rawEntry && rawEntry.supports_generation !== undefined
+      ? Boolean(rawEntry.supports_generation)
+      : modelType === "kokoro";
+  const voices = Array.isArray(rawEntry && rawEntry.voices) ? rawEntry.voices : [];
+
+  return {
+    id: modelId,
+    display_name: String((rawEntry && rawEntry.display_name) || modelId || "Model"),
+    model_type: modelType,
+    model_type_label: String((rawEntry && rawEntry.model_type_label) || modelTypeLabel(modelType)),
+    description: String((rawEntry && rawEntry.description) || ""),
+    predefined: Boolean(rawEntry && rawEntry.predefined),
+    download_required:
+      rawEntry && rawEntry.download_required !== undefined
+        ? Boolean(rawEntry.download_required)
+        : modelId !== LOCAL_DEFAULT_MODEL_ID,
+    downloaded,
+    status,
+    progress,
+    message: String((rawEntry && rawEntry.message) || ""),
+    error: (rawEntry && rawEntry.error) || null,
+    supports_generation: supportsGeneration,
+    voices,
+  };
+}
+
+function upsertModelEntry(entry) {
+  const normalized = normalizeModelEntry(entry);
+  if (!normalized.id) return;
+
+  const index = state.models.findIndex((model) => model.id === normalized.id);
+  if (index >= 0) {
+    state.models[index] = { ...state.models[index], ...normalized };
+  } else {
+    state.models.push(normalized);
+  }
+}
+
+function currentSelectedModel() {
+  return state.models.find((model) => model.id === state.selectedModelId) || null;
+}
+
+function setModelStatusMessage(message) {
+  const statusEl = byId("modelStatusMessage");
+  if (!statusEl) return;
+  statusEl.textContent = String(message || "");
+}
+
+function setModelDownloadProgress(value) {
+  const bar = byId("modelDownloadBar");
+  if (!bar) return;
+  const bounded = Math.max(0, Math.min(100, Number(value) || 0));
+  bar.style.width = `${bounded}%`;
+}
+
+function formatModelOption(model) {
+  const readiness =
+    model.download_required === false ? "ready" : model.downloaded ? "downloaded" : "not downloaded";
+  return `${model.display_name} (${model.model_type_label}) - ${readiness}`;
+}
+
+function renderModelOptions() {
+  const modelSelect = byId("modelSelect");
+  if (!modelSelect) return;
+
+  modelSelect.innerHTML = "";
+  if (!state.models.length) {
+    const option = document.createElement("option");
+    option.value = LOCAL_DEFAULT_MODEL_ID;
+    option.textContent = "Built-in Kokoro (default)";
+    modelSelect.appendChild(option);
+    state.selectedModelId = LOCAL_DEFAULT_MODEL_ID;
+    return;
+  }
+
+  state.models.forEach((model) => {
+    const option = document.createElement("option");
+    option.value = model.id;
+    option.textContent = formatModelOption(model);
+    modelSelect.appendChild(option);
+  });
+
+  const hasSelected = state.models.some((model) => model.id === state.selectedModelId);
+  if (!hasSelected) {
+    state.selectedModelId = state.defaultModelId || state.models[0].id;
+  }
+
+  modelSelect.value = state.selectedModelId;
+}
+
+function modelReadinessMessage(model) {
+  if (!model) {
+    return "Select a model before generation.";
+  }
+
+  if (model.id === LOCAL_DEFAULT_MODEL_ID) {
+    return "Built-in Kokoro is ready.";
+  }
+
+  if (model.status === "downloading") {
+    return model.message || "Downloading selected model...";
+  }
+
+  if (!model.downloaded) {
+    return "Download this model before generation.";
+  }
+
+  if (!model.supports_generation) {
+    return "This model type is download/select only right now. Generation currently supports Kokoro models.";
+  }
+
+  if (model.error) {
+    return String(model.error);
+  }
+
+  return model.message || "Model is ready.";
+}
+
+function modelBlocksGeneration() {
+  const model = currentSelectedModel();
+  if (!model) return true;
+  if (model.id === LOCAL_DEFAULT_MODEL_ID) return false;
+  if (!model.downloaded) return true;
+  if (!model.supports_generation) return true;
+  return false;
+}
+
+async function refreshModelCatalog(preserveSelection = true) {
+  try {
+    const response = await fetch("/api/models");
+    const payload = await response.json();
+    if (!response.ok) {
+      throw new Error(payload.error || "Failed to load model catalog");
+    }
+
+    const previousSelection = state.selectedModelId;
+    state.defaultModelId = String(payload.default_model_id || LOCAL_DEFAULT_MODEL_ID);
+    state.models = Array.isArray(payload.models) ? payload.models.map(normalizeModelEntry) : [];
+
+    if (preserveSelection && previousSelection && state.models.some((item) => item.id === previousSelection)) {
+      state.selectedModelId = previousSelection;
+    } else {
+      state.selectedModelId = state.defaultModelId;
+    }
+
+    renderModelOptions();
+    await syncModelControlsFromSelection();
+  } catch (error) {
+    setModelStatusMessage(error.message || String(error));
+  }
+}
+
+function renderVoiceOptions(voices) {
+  const voiceSelect = byId("voiceSelect");
+  if (!voiceSelect) return;
+
+  const currentValue = voiceSelect.value;
+  voiceSelect.innerHTML = "";
+
+  if (!voices.length) {
+    const placeholder = document.createElement("option");
+    placeholder.value = "";
+    placeholder.textContent = "No voices available";
+    voiceSelect.appendChild(placeholder);
+    voiceSelect.disabled = true;
+    return;
+  }
+
+  voices.forEach((voice) => {
+    const option = document.createElement("option");
+    option.value = voice;
+    option.textContent = voice;
+    voiceSelect.appendChild(option);
+  });
+
+  voiceSelect.disabled = false;
+  if (voices.includes(currentValue)) {
+    voiceSelect.value = currentValue;
+  }
+}
+
+async function refreshVoicesForSelection() {
+  const model = currentSelectedModel();
+  const modelTypeSelect = byId("modelTypeSelect");
+  const voiceHint = byId("voiceHint");
+
+  if (!modelTypeSelect) return;
+
+  const requestedModelType = normalizedModelType(modelTypeSelect.value || (model && model.model_type) || "kokoro");
+  const params = new URLSearchParams();
+  if (model && model.id) {
+    params.set("model_id", model.id);
+  }
+  params.set("model_type", requestedModelType);
+
+  try {
+    const response = await fetch(`/api/models/voices?${params.toString()}`);
+    const payload = await response.json();
+    if (!response.ok) {
+      throw new Error(payload.error || "Failed to load model voices");
+    }
+
+    const status = payload.status || {};
+    const voices = Array.isArray(status.voices) ? status.voices : [];
+    renderVoiceOptions(voices);
+
+    if (model) {
+      upsertModelEntry({
+        ...model,
+        model_type: normalizedModelType(status.model_type || requestedModelType),
+        voices,
+        supports_generation: Boolean(status.supports_generation),
+      });
+    }
+
+    if (voiceHint) {
+      if (status.supports_generation) {
+        voiceHint.textContent = "Voices are loaded from the selected model.";
+      } else {
+        voiceHint.textContent =
+          "Selected model type is download/select only right now. Generation currently supports Kokoro models.";
+      }
+    }
+  } catch (error) {
+    renderVoiceOptions([]);
+    if (voiceHint) {
+      voiceHint.textContent = error.message || String(error);
+    }
+  }
+}
+
+async function syncModelControlsFromSelection() {
+  const model = currentSelectedModel();
+  const modelSelect = byId("modelSelect");
+  const modelTypeSelect = byId("modelTypeSelect");
+  const hfModelId = byId("hfModelId");
+
+  if (modelSelect && model) {
+    modelSelect.value = model.id;
+  }
+
+  if (modelTypeSelect) {
+    modelTypeSelect.value = normalizedModelType(model && model.model_type);
+  }
+
+  if (hfModelId && model) {
+    hfModelId.value = model.id === LOCAL_DEFAULT_MODEL_ID ? "" : model.id;
+  }
+
+  const progressValue = model ? model.progress : 0;
+  setModelDownloadProgress(progressValue);
+  setModelStatusMessage(modelReadinessMessage(model));
+
+  await refreshVoicesForSelection();
+  updateJobActions({ can_stop: false, can_clear_files: false, active: false, status: "idle" });
+}
+
+async function refreshModelDownloadStatus(modelId) {
+  if (!modelId) return null;
+
+  const params = new URLSearchParams({ model_id: modelId });
+  const model = currentSelectedModel();
+  if (model && model.model_type) {
+    params.set("model_type", model.model_type);
+  }
+
+  const response = await fetch(`/api/models/download-status?${params.toString()}`);
+  const payload = await response.json();
+  if (!response.ok) {
+    throw new Error(payload.error || "Failed to fetch model download status");
+  }
+
+  const status = normalizeModelEntry(payload.status || {});
+  upsertModelEntry(status);
+
+  if (status.id === state.selectedModelId) {
+    setModelDownloadProgress(status.progress);
+    setModelStatusMessage(modelReadinessMessage(status));
+  }
+
+  if (MODEL_DOWNLOAD_TERMINAL_STATUSES.has(status.status)) {
+    stopModelDownloadPolling();
+    await refreshModelCatalog(true);
+  }
+
+  updateJobActions({ can_stop: false, can_clear_files: false, active: false, status: "idle" });
+  return status;
+}
+
+function startModelDownloadPolling(modelId) {
+  stopModelDownloadPolling();
+  state.modelDownloadTargetId = modelId;
+  refreshModelDownloadStatus(modelId).catch((error) => setModelStatusMessage(error.message || String(error)));
+  state.modelDownloadPollTimer = setInterval(() => {
+    refreshModelDownloadStatus(modelId).catch((error) => {
+      setModelStatusMessage(error.message || String(error));
+      stopModelDownloadPolling();
+    });
+  }, 1500);
+}
+
+function stopModelDownloadPolling() {
+  if (state.modelDownloadPollTimer) {
+    clearInterval(state.modelDownloadPollTimer);
+    state.modelDownloadPollTimer = null;
+  }
+  state.modelDownloadTargetId = null;
+}
+
+async function downloadModel() {
+  if (state.modelDownloadInFlight) {
+    return;
+  }
+
+  const modelSelect = byId("modelSelect");
+  const modelTypeSelect = byId("modelTypeSelect");
+  const hfModelId = byId("hfModelId");
+  const downloadButton = byId("downloadModelButton");
+
+  const selectedModelId = String((modelSelect && modelSelect.value) || state.selectedModelId || state.defaultModelId || "");
+  const manualModelId = String((hfModelId && hfModelId.value) || "").trim();
+  const requestedModelId = manualModelId || selectedModelId;
+  const requestedModelType = normalizedModelType((modelTypeSelect && modelTypeSelect.value) || "kokoro");
+
+  if (!requestedModelId) {
+    setModelStatusMessage("Select a model or enter a manual model ID before downloading.");
+    return;
+  }
+
+  if (requestedModelId === LOCAL_DEFAULT_MODEL_ID) {
+    setModelStatusMessage("Built-in Kokoro is ready and does not require downloading.");
+    setModelDownloadProgress(100);
+    await refreshModelCatalog(true);
+    return;
+  }
+
+  state.modelDownloadInFlight = true;
+  if (downloadButton) {
+    downloadButton.disabled = true;
+    downloadButton.textContent = "Starting Download...";
+  }
+
+  try {
+    const csrfToken = getCsrfToken();
+    if (!csrfToken) {
+      throw new Error("Missing CSRF token. Refresh the page and try again.");
+    }
+
+    const response = await fetch("/api/models/download", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-CSRF-Token": csrfToken,
+      },
+      body: JSON.stringify({
+        model_id: requestedModelId,
+        model_type: requestedModelType,
+      }),
+    });
+
+    const payload = await response.json();
+    if (!response.ok) {
+      throw new Error(payload.error || "Failed to start model download");
+    }
+
+    const status = normalizeModelEntry(payload.status || {});
+    upsertModelEntry(status);
+    state.selectedModelId = status.id || requestedModelId;
+    renderModelOptions();
+    if (modelSelect) {
+      modelSelect.value = state.selectedModelId;
+    }
+
+    setModelDownloadProgress(status.progress);
+    setModelStatusMessage(modelReadinessMessage(status));
+    await refreshVoicesForSelection();
+
+    if (payload.started) {
+      startModelDownloadPolling(state.selectedModelId);
+    } else {
+      stopModelDownloadPolling();
+      await refreshModelCatalog(true);
+    }
+  } catch (error) {
+    setModelStatusMessage(error.message || String(error));
+  } finally {
+    state.modelDownloadInFlight = false;
+    if (downloadButton) {
+      downloadButton.disabled = false;
+      downloadButton.textContent = "Download Model";
+    }
+    updateJobActions({ can_stop: false, can_clear_files: false, active: false, status: "idle" });
+  }
 }
 
 function updateEstimatedFiles() {
@@ -74,6 +491,7 @@ function updateJobActions(statusData) {
   const canStop = Boolean(statusData && statusData.can_stop);
   const canClearFiles = Boolean(statusData && statusData.can_clear_files);
   const isBusy = Boolean(statusData && (statusData.active || statusData.status === "stopping"));
+  const blockedByModel = modelBlocksGeneration();
 
   setActionVisibility(stopButton, canStop || state.stopRequestInFlight);
   if (stopButton) {
@@ -88,7 +506,8 @@ function updateJobActions(statusData) {
   }
 
   if (generateButton) {
-    generateButton.disabled = !state.jobId || isBusy || state.stopRequestInFlight || state.clearRequestInFlight;
+    generateButton.disabled =
+      !state.jobId || isBusy || state.stopRequestInFlight || state.clearRequestInFlight || blockedByModel;
   }
 }
 
@@ -172,8 +591,22 @@ function renderJobDetails(statusData) {
     ["Last Updated", formatDateTime(statusData.updated_at)],
     ["Predicted Duration", formatDuration(estimatedSeconds)],
     ["Predicted Finish", predictedFinish ? formatDateTime(predictedFinish) : "waiting to start"],
-    ["Time Ended", finishedAt ? formatDateTime(finishedAt) : (["completed", "failed"].includes(statusData.status) ? "not available" : "in progress")],
-    ["Time Taken", statusData.elapsed_seconds !== null && statusData.elapsed_seconds !== undefined ? formatDuration(statusData.elapsed_seconds) : (startedAt ? "in progress" : "not started")],
+    [
+      "Time Ended",
+      finishedAt
+        ? formatDateTime(finishedAt)
+        : ["completed", "failed"].includes(statusData.status)
+          ? "not available"
+          : "in progress",
+    ],
+    [
+      "Time Taken",
+      statusData.elapsed_seconds !== null && statusData.elapsed_seconds !== undefined
+        ? formatDuration(statusData.elapsed_seconds)
+        : startedAt
+          ? "in progress"
+          : "not started",
+    ],
   ];
 
   rows.forEach(([label, value]) => {
@@ -389,11 +822,6 @@ async function uploadEpubFile(file) {
   byId("outputName").value = payload.suggested_name;
   byId("statusMessage").textContent = `Upload complete. ${payload.chapters_count} chapters detected.`;
 
-  const generateButton = byId("generateButton");
-  if (generateButton) {
-    generateButton.disabled = false;
-  }
-
   setBadge("uploaded");
   byId("progressBar").value = 0;
   renderFiles([]);
@@ -429,12 +857,25 @@ async function generateAudio() {
     throw new Error("Please upload an EPUB first.");
   }
 
+  const selectedModel = currentSelectedModel();
+  if (modelBlocksGeneration()) {
+    throw new Error(modelReadinessMessage(selectedModel));
+  }
+
+  const selectedModelId = (selectedModel && selectedModel.id) || state.defaultModelId || LOCAL_DEFAULT_MODEL_ID;
+  const modelType = normalizedModelType(
+    (byId("modelTypeSelect") && byId("modelTypeSelect").value) || (selectedModel && selectedModel.model_type),
+  );
+  const hfModelId = selectedModelId === LOCAL_DEFAULT_MODEL_ID ? "" : selectedModelId;
+
   const payload = {
     job_id: state.jobId,
     output_name: byId("outputName").value,
     output_dir: byId("outputDir").value,
     voice: byId("voiceSelect").value,
-    hf_model_id: byId("hfModelId") ? byId("hfModelId").value : "",
+    hf_model_id: hfModelId,
+    model_id: selectedModelId,
+    model_type: modelType,
     mode: selectedMode(),
   };
 
@@ -467,6 +908,10 @@ function bindEvents() {
   const dropZone = byId("dropZone");
   const fileInput = byId("epubFile");
   const generateButton = byId("generateButton");
+  const modelSelect = byId("modelSelect");
+  const modelTypeSelect = byId("modelTypeSelect");
+  const hfModelInput = byId("hfModelId");
+  const downloadModelButton = byId("downloadModelButton");
 
   if (!fileInput) {
     console.warn("`epubFile` input not found - file selection disabled");
@@ -512,8 +957,52 @@ function bindEvents() {
         byId("statusMessage").textContent = error.message;
         setBadge("failed");
       } finally {
-        generateButton.disabled = false;
+        updateJobActions({ can_stop: false, can_clear_files: false, active: false, status: "idle" });
       }
+    });
+  }
+
+  if (downloadModelButton) {
+    downloadModelButton.addEventListener("click", async () => {
+      await downloadModel();
+    });
+  }
+
+  if (modelSelect) {
+    modelSelect.addEventListener("change", async () => {
+      state.selectedModelId = modelSelect.value;
+      await syncModelControlsFromSelection();
+    });
+  }
+
+  if (modelTypeSelect) {
+    modelTypeSelect.addEventListener("change", async () => {
+      const selected = currentSelectedModel();
+      const nextType = normalizedModelType(modelTypeSelect.value);
+      if (selected) {
+        upsertModelEntry({
+          ...selected,
+          model_type: nextType,
+          model_type_label: modelTypeLabel(nextType),
+        });
+      }
+
+      await refreshVoicesForSelection();
+      setModelStatusMessage(modelReadinessMessage(currentSelectedModel()));
+      updateJobActions({ can_stop: false, can_clear_files: false, active: false, status: "idle" });
+    });
+  }
+
+  if (hfModelInput) {
+    hfModelInput.addEventListener("input", () => {
+      const text = String(hfModelInput.value || "").trim();
+      if (text) {
+        setModelStatusMessage("Manual model entered. Select a type and click Download Model.");
+        setModelDownloadProgress(0);
+      } else {
+        setModelStatusMessage(modelReadinessMessage(currentSelectedModel()));
+      }
+      updateJobActions({ can_stop: false, can_clear_files: false, active: false, status: "idle" });
     });
   }
 
@@ -544,15 +1033,19 @@ function bindEvents() {
   const modeInputs = document.querySelectorAll('input[name="mode"]');
   modeInputs.forEach((input) => input.addEventListener("change", updateEstimatedFiles));
 
-  const hfModelInput = byId("hfModelId");
-  if (hfModelInput) {
-    hfModelInput.addEventListener("input", syncVoiceSelectionState);
-  }
-
   updateJobActions({ can_stop: false, can_clear_files: false, active: false, status: "idle" });
   updateEstimatedFiles();
-  syncVoiceSelectionState();
+  setModelDownloadProgress(0);
 }
 
-window.addEventListener("beforeunload", stopPolling);
-window.addEventListener("DOMContentLoaded", bindEvents);
+async function initializeApp() {
+  bindEvents();
+  await refreshModelCatalog(false);
+  renderFiles([]);
+}
+
+window.addEventListener("beforeunload", () => {
+  stopPolling();
+  stopModelDownloadPolling();
+});
+window.addEventListener("DOMContentLoaded", initializeApp);

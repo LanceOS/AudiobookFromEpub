@@ -158,9 +158,7 @@ class HelperFunctionTests(unittest.TestCase):
         by_id = {str(entry.get("id")): entry for entry in models}
         self.assertIn(app_main.LOCAL_DEFAULT_MODEL_ID, by_id)
         self.assertIn("hexgrad/Kokoro-82M", by_id)
-        self.assertIn("openbmb/VoxCPM2", by_id)
         self.assertEqual(by_id["hexgrad/Kokoro-82M"].get("model_type"), "kokoro")
-        self.assertEqual(by_id["openbmb/VoxCPM2"].get("model_type"), "vox")
 
     def test_start_model_download_returns_cached_model_without_worker(self) -> None:
         with app_main.MODEL_DOWNLOADS_LOCK:

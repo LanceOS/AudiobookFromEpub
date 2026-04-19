@@ -100,12 +100,6 @@ PREDEFINED_MODEL_CATALOG = [
         "model_type": "kokoro",
         "description": "Official Kokoro model repository.",
     },
-    {
-        "id": "openbmb/VoxCPM2",
-        "display_name": "VoxCPM2 (Hugging Face)",
-        "model_type": "vox",
-        "description": "VoxCPM2 repository (download/select support).",
-    },
 ]
 
 JOBS: Dict[str, Dict] = {}

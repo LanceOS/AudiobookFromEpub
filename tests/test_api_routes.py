@@ -183,20 +183,15 @@ class ApiRoutesTests(unittest.TestCase):
         self.assertEqual(payload.get("default_model_id"), LOCAL_DEFAULT_MODEL_ID)
 
         models = payload.get("models") or []
-        self.assertGreaterEqual(len(models), 3)
+        self.assertGreaterEqual(len(models), 2)
 
         by_id = {str(item.get("id")): item for item in models}
         self.assertIn(LOCAL_DEFAULT_MODEL_ID, by_id)
         self.assertIn("hexgrad/Kokoro-82M", by_id)
-        self.assertIn("openbmb/VoxCPM2", by_id)
 
         default_model = by_id[LOCAL_DEFAULT_MODEL_ID]
         self.assertEqual(default_model.get("status"), "ready")
         self.assertTrue(default_model.get("supports_generation"))
-
-        vox_model = by_id["openbmb/VoxCPM2"]
-        self.assertEqual(vox_model.get("model_type"), "vox")
-        self.assertFalse(vox_model.get("supports_generation"))
 
     def test_model_download_rejects_invalid_model_id(self) -> None:
         response = self.client.post(

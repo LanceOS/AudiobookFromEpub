@@ -36,7 +36,7 @@ function selectedMode() {
 
 function normalizedModelType(rawValue) {
   const value = String(rawValue || "").trim().toLowerCase();
-  if (["kokoro", "other"].includes(value)) {
+  if (["kokoro", "other", "vox"].includes(value)) {
     return value;
   }
   return "kokoro";
@@ -45,6 +45,7 @@ function normalizedModelType(rawValue) {
 function modelTypeLabel(modelType) {
   const normalized = normalizedModelType(modelType);
   if (normalized === "other") return "Other";
+  if (normalized === "vox") return "Vox";
   return "Kokoro";
 }
 

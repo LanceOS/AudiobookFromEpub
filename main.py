@@ -295,7 +295,10 @@ def get_csrf_token() -> str:
 
 
 def is_same_origin_request() -> bool:
-    request_host = request.host.lower()
+    request_host = (request.host or "").lower()
+    # Compare both host:port and hostnames. Allow common loopback aliases
+    # (e.g. localhost vs 127.0.0.1) to be considered equivalent for local dev.
+    request_hostname = request_host.split(":")[0]
     for header_name in ("Origin", "Referer"):
         header_value = request.headers.get(header_name)
         if not header_value:
@@ -303,8 +306,24 @@ def is_same_origin_request() -> bool:
         parsed = urlparse(header_value)
         if not parsed.netloc:
             continue
-        if not hmac.compare_digest(parsed.netloc.lower(), request_host):
-            return False
+        header_netloc = parsed.netloc.lower()
+        header_hostname = header_netloc.split(":")[0]
+
+        # Exact host:port match is allowed
+        if hmac.compare_digest(header_netloc, request_host):
+            continue
+
+        # Hostname match (ignoring port) is allowed
+        if hmac.compare_digest(header_hostname, request_hostname):
+            continue
+
+        # Treat common loopback names as equivalent
+        loopback_aliases = {"127.0.0.1", "localhost", "::1"}
+        if header_hostname in loopback_aliases and request_hostname in loopback_aliases:
+            continue
+
+        return False
+
     return True
 
 

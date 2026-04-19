@@ -81,6 +81,33 @@ VOICE_OPTIONS = [
     "pf_dora",
 ]
 
+LOCAL_DEFAULT_MODEL_ID = "__local_kokoro_default__"
+MODEL_TYPE_OPTIONS = {"kokoro", "vox", "other"}
+MODEL_TYPE_LABELS = {
+    "kokoro": "Kokoro",
+    "vox": "Vox",
+    "other": "Other",
+}
+MODEL_VOICE_OPTIONS = {
+    "kokoro": list(VOICE_OPTIONS),
+    "vox": ["vox_default"],
+    "other": ["default"],
+}
+PREDEFINED_MODEL_CATALOG = [
+    {
+        "id": "hexgrad/Kokoro-82M",
+        "display_name": "Kokoro 82M (Hugging Face)",
+        "model_type": "kokoro",
+        "description": "Official Kokoro model repository.",
+    },
+    {
+        "id": "openbmb/VoxCPM2",
+        "display_name": "VoxCPM2 (Hugging Face)",
+        "model_type": "vox",
+        "description": "VoxCPM2 repository (download/select support).",
+    },
+]
+
 JOBS: Dict[str, Dict] = {}
 JOBS_LOCK = threading.Lock()
 WORKERS: Dict[str, threading.Thread] = {}
@@ -193,6 +220,94 @@ def validate_hf_model_id(raw_value: object) -> Tuple[Optional[str], Optional[str
         return None, "Hugging Face model ID must look like 'namespace/model' or 'model'."
 
     return model_id, None
+
+
+def normalize_model_type(raw_value: object, default: str = "kokoro") -> str:
+    model_type = str(raw_value or "").strip().lower()
+    if model_type in MODEL_TYPE_OPTIONS:
+        return model_type
+    return default
+
+
+def supports_generation_for_model_type(model_type: str) -> bool:
+    return normalize_model_type(model_type) == "kokoro"
+
+
+def model_voices_for_type(model_type: str) -> List[str]:
+    normalized_type = normalize_model_type(model_type)
+    return list(MODEL_VOICE_OPTIONS.get(normalized_type, MODEL_VOICE_OPTIONS["other"]))
+
+
+def is_hf_model_cached(model_id: str) -> bool:
+    if not model_id:
+        return False
+
+    cache_path = get_hf_model_cache_path(model_id)
+    if not cache_path.exists() or not cache_path.is_dir():
+        return False
+
+    for path in cache_path.rglob("*"):
+        if path.is_file():
+            return True
+    return False
+
+
+def build_model_catalog_entry(
+    model_id: str,
+    display_name: str,
+    model_type: str,
+    *,
+    description: str,
+    predefined: bool,
+) -> Dict:
+    normalized_type = normalize_model_type(model_type)
+    downloaded = is_hf_model_cached(model_id)
+    status = "downloaded" if downloaded else "not_downloaded"
+    supports_generation = supports_generation_for_model_type(normalized_type)
+    return {
+        "id": model_id,
+        "display_name": display_name,
+        "model_type": normalized_type,
+        "model_type_label": MODEL_TYPE_LABELS.get(normalized_type, MODEL_TYPE_LABELS["other"]),
+        "description": description,
+        "predefined": bool(predefined),
+        "download_required": True,
+        "downloaded": downloaded,
+        "status": status,
+        "supports_generation": supports_generation,
+        "voices": model_voices_for_type(normalized_type),
+    }
+
+
+def local_default_model_entry() -> Dict:
+    return {
+        "id": LOCAL_DEFAULT_MODEL_ID,
+        "display_name": "Built-in Kokoro (default)",
+        "model_type": "kokoro",
+        "model_type_label": MODEL_TYPE_LABELS["kokoro"],
+        "description": "Bundled Kokoro model shipped with this app.",
+        "predefined": True,
+        "download_required": False,
+        "downloaded": True,
+        "status": "ready",
+        "supports_generation": True,
+        "voices": model_voices_for_type("kokoro"),
+    }
+
+
+def list_available_models() -> List[Dict]:
+    models = [local_default_model_entry()]
+    for item in PREDEFINED_MODEL_CATALOG:
+        models.append(
+            build_model_catalog_entry(
+                str(item["id"]),
+                str(item["display_name"]),
+                str(item["model_type"]),
+                description=str(item.get("description", "")),
+                predefined=True,
+            )
+        )
+    return models
 
 
 def get_hf_model_cache_root() -> Path:
@@ -1594,6 +1709,18 @@ def api_upload():
             "detected_title": detected_title,
             "suggested_name": suggested_name,
             "chapters_count": len(chapters),
+        }
+    )
+
+
+@app.get("/api/models")
+def api_models():
+    ensure_app_dirs()
+    return jsonify(
+        {
+            "default_model_id": LOCAL_DEFAULT_MODEL_ID,
+            "default_model_type": "kokoro",
+            "models": list_available_models(),
         }
     )
 

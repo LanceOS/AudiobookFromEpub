@@ -37,7 +37,10 @@ from main import (  # type: ignore[reportMissingImports]
     is_lfs_pointer,
     looks_like_valid_epub,
     maybe_cleanup_stale_data,
+    model_voices_for_type,
+    normalize_model_type,
     rate_limit_bucket_for_request,
+    supports_generation_for_model_type,
     synthesize_text_to_wav,
     should_enable_cleanup,
     slugify,
@@ -133,6 +136,28 @@ class HelperFunctionTests(unittest.TestCase):
         model_id, error = validate_hf_model_id("../../bad")
         self.assertIsNone(model_id)
         self.assertIn("Hugging Face model ID", str(error))
+
+    def test_normalize_model_type_defaults_unknown_values(self) -> None:
+        self.assertEqual(normalize_model_type("kokoro"), "kokoro")
+        self.assertEqual(normalize_model_type("VOX"), "vox")
+        self.assertEqual(normalize_model_type("not-real"), "kokoro")
+
+    def test_model_voices_for_type_and_generation_support(self) -> None:
+        self.assertIn("af_heart", model_voices_for_type("kokoro"))
+        self.assertEqual(model_voices_for_type("vox"), ["vox_default"])
+        self.assertTrue(supports_generation_for_model_type("kokoro"))
+        self.assertFalse(supports_generation_for_model_type("vox"))
+
+    def test_list_available_models_contains_expected_entries(self) -> None:
+        with mock.patch.object(app_main, "is_hf_model_cached", return_value=False):
+            models = app_main.list_available_models()
+
+        by_id = {str(entry.get("id")): entry for entry in models}
+        self.assertIn(app_main.LOCAL_DEFAULT_MODEL_ID, by_id)
+        self.assertIn("hexgrad/Kokoro-82M", by_id)
+        self.assertIn("openbmb/VoxCPM2", by_id)
+        self.assertEqual(by_id["hexgrad/Kokoro-82M"].get("model_type"), "kokoro")
+        self.assertEqual(by_id["openbmb/VoxCPM2"].get("model_type"), "vox")
 
     def test_get_hf_model_cache_path_sanitizes_model_id(self) -> None:
         with mock.patch.object(app_main, "get_hf_model_cache_root", return_value=Path("/tmp/hf-cache")):

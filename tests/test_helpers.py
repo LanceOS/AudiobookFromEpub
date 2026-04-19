@@ -39,6 +39,7 @@ from main import (  # type: ignore[reportMissingImports]
     maybe_cleanup_stale_data,
     model_voices_for_type,
     model_download_status,
+    model_voice_status,
     normalize_model_type,
     rate_limit_bucket_for_request,
     start_model_download,
@@ -179,6 +180,17 @@ class HelperFunctionTests(unittest.TestCase):
         self.assertEqual(status.get("status"), "ready")
         self.assertTrue(status.get("downloaded"))
         self.assertFalse(status.get("active_download"))
+
+    def test_model_voice_status_prefers_selected_model_type(self) -> None:
+        payload = model_voice_status(None, "vox")
+        self.assertEqual(payload.get("model_type"), "vox")
+        self.assertEqual(payload.get("voices"), ["vox_default"])
+        self.assertFalse(payload.get("supports_generation"))
+
+    def test_model_voice_status_infers_type_for_predefined_model(self) -> None:
+        payload = model_voice_status("hexgrad/Kokoro-82M", None)
+        self.assertEqual(payload.get("model_type"), "kokoro")
+        self.assertIn("af_heart", payload.get("voices") or [])
 
     def test_get_hf_model_cache_path_sanitizes_model_id(self) -> None:
         with mock.patch.object(app_main, "get_hf_model_cache_root", return_value=Path("/tmp/hf-cache")):

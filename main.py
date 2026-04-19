@@ -771,6 +771,26 @@ def model_download_status(model_id: str, model_type: Optional[str] = None) -> Di
     return entry
 
 
+def model_voice_status(model_id: Optional[str], model_type: Optional[str]) -> Dict:
+    target_model_id = str(model_id or "").strip() or None
+    requested_type = normalize_model_type(model_type, default="kokoro")
+
+    if target_model_id:
+        entry = get_model_catalog_entry(target_model_id, requested_type)
+        if not model_type:
+            requested_type = normalize_model_type(entry.get("model_type"), default=requested_type)
+
+    supports_generation = supports_generation_for_model_type(requested_type)
+    voices = model_voices_for_type(requested_type)
+    return {
+        "model_id": target_model_id,
+        "model_type": requested_type,
+        "model_type_label": MODEL_TYPE_LABELS.get(requested_type, MODEL_TYPE_LABELS["other"]),
+        "voices": voices,
+        "supports_generation": supports_generation,
+    }
+
+
 def resolve_local_kokoro_assets(model_cache_path: Path) -> Tuple[Optional[Path], Optional[Path], Optional[str]]:
     config_path = model_cache_path / "config.json"
     if not config_path.exists() or not config_path.is_file():
@@ -2074,6 +2094,23 @@ def api_model_download_status():
         default=infer_model_type_for_model(model_id, fallback="kokoro"),
     )
     return jsonify({"ok": True, "status": model_download_status(model_id, model_type)})
+
+
+@app.get("/api/models/voices")
+def api_model_voices():
+    requested_model_id = normalize_hf_model_id(request.args.get("model_id"))
+    if requested_model_id and requested_model_id != LOCAL_DEFAULT_MODEL_ID:
+        normalized_model_id, model_err = validate_hf_model_id(requested_model_id)
+        if model_err:
+            return jsonify({"error": model_err}), 400
+        requested_model_id = str(normalized_model_id)
+
+    requested_model_type = request.args.get("model_type")
+    if requested_model_id and not requested_model_type:
+        requested_model_type = infer_model_type_for_model(requested_model_id, fallback="kokoro")
+
+    payload = model_voice_status(requested_model_id, requested_model_type)
+    return jsonify({"ok": True, "status": payload})
 
 
 @app.post("/api/generate")

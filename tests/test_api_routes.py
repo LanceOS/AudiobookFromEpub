@@ -237,6 +237,26 @@ class ApiRoutesTests(unittest.TestCase):
             self.assertEqual(second.status_code, 200, second_payload)
             self.assertFalse(second_payload.get("started"))
 
+    def test_model_voices_route_returns_local_kokoro_voices(self) -> None:
+        response = self.client.get(f"/api/models/voices?model_id={LOCAL_DEFAULT_MODEL_ID}")
+        payload = response.get_json(silent=True) or {}
+
+        self.assertEqual(response.status_code, 200, payload)
+        status = payload.get("status") or {}
+        self.assertEqual(status.get("model_type"), "kokoro")
+        self.assertTrue(status.get("supports_generation"))
+        self.assertIn("af_heart", status.get("voices") or [])
+
+    def test_model_voices_route_supports_vox_type(self) -> None:
+        response = self.client.get("/api/models/voices?model_type=vox")
+        payload = response.get_json(silent=True) or {}
+
+        self.assertEqual(response.status_code, 200, payload)
+        status = payload.get("status") or {}
+        self.assertEqual(status.get("model_type"), "vox")
+        self.assertFalse(status.get("supports_generation"))
+        self.assertEqual(status.get("voices"), ["vox_default"])
+
     def test_upload_rejects_missing_epub_field(self) -> None:
         response = self.client.post(
             "/api/upload",

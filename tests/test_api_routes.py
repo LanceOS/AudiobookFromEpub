@@ -250,7 +250,7 @@ class ApiRoutesTests(unittest.TestCase):
         self.assertTrue(status.get("supports_generation"))
         self.assertIn("af_heart", status.get("voices") or [])
 
-    def test_model_voices_route_supports_vox_type(self) -> None:
+    def test_model_voices_route_returns_default_voice_for_other_type(self) -> None:
         response = self.client.get("/api/models/voices?model_type=other")
         payload = response.get_json(silent=True) or {}
 

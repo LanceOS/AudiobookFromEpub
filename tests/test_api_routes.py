@@ -251,14 +251,14 @@ class ApiRoutesTests(unittest.TestCase):
         self.assertIn("af_heart", status.get("voices") or [])
 
     def test_model_voices_route_supports_vox_type(self) -> None:
-        response = self.client.get("/api/models/voices?model_type=vox")
+        response = self.client.get("/api/models/voices?model_type=other")
         payload = response.get_json(silent=True) or {}
 
         self.assertEqual(response.status_code, 200, payload)
         status = payload.get("status") or {}
-        self.assertEqual(status.get("model_type"), "vox")
+        self.assertEqual(status.get("model_type"), "other")
         self.assertFalse(status.get("supports_generation"))
-        self.assertEqual(status.get("voices"), ["vox_default"])
+        self.assertEqual(status.get("voices"), ["default"])
 
     def test_upload_rejects_missing_epub_field(self) -> None:
         response = self.client.post(
@@ -404,18 +404,17 @@ class ApiRoutesTests(unittest.TestCase):
 
     def test_generate_rejects_unsupported_vox_model_type(self) -> None:
         upload_payload = self._upload_placeholder_epub()
-
         with mock.patch.object(app_main, "is_hf_model_cached", return_value=True):
             response = self.client.post(
                 "/api/generate",
                 json={
                     "job_id": upload_payload["job_id"],
                     "output_dir": str(DEFAULT_OUTPUT_DIR),
-                    "output_name": "vox-unsupported",
+                    "output_name": "other-unsupported",
                     "mode": "single",
-                    "voice": "vox_default",
+                    "voice": "default",
                     "model_id": "openbmb/VoxCPM2",
-                    "model_type": "vox",
+                    "model_type": "other",
                 },
                 headers=self._headers(),
             )

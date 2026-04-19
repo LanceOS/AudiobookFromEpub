@@ -82,15 +82,13 @@ VOICE_OPTIONS = [
 ]
 
 LOCAL_DEFAULT_MODEL_ID = "__local_kokoro_default__"
-MODEL_TYPE_OPTIONS = {"kokoro", "vox", "other"}
+MODEL_TYPE_OPTIONS = {"kokoro", "other"}
 MODEL_TYPE_LABELS = {
     "kokoro": "Kokoro",
-    "vox": "Vox",
     "other": "Other",
 }
 MODEL_VOICE_OPTIONS = {
     "kokoro": list(VOICE_OPTIONS),
-    "vox": ["vox_default"],
     "other": ["default"],
 }
 PREDEFINED_MODEL_CATALOG = [

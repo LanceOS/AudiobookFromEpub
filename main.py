@@ -29,6 +29,39 @@ from typing import Callable, Dict, List, Optional, Tuple
 from urllib.parse import urlparse
 
 import numpy as np
+from core.config import (
+    ACTIVE_JOB_STATUSES,
+    ALLOWED_UPLOAD_EXTENSIONS,
+    APP_DATA_DIR,
+    BASE_DIR,
+    DEFAULT_HF_MODEL_CACHE_DIR,
+    DEFAULT_OUTPUT_DIR,
+    HF_MODEL_CACHE_DIR_SEGMENT_RE,
+    JOB_META_DIR,
+    LOCAL_DEFAULT_MODEL_ID,
+    MODEL_TYPE_LABELS,
+    PREDEFINED_MODEL_CATALOG,
+    UPLOADS_DIR,
+    VOICE_OPTIONS,
+    max_upload_bytes_from_env,
+)
+from utils.helpers import (
+    calculate_elapsed_seconds,
+    create_run_folder,
+    get_allowed_output_root,
+    is_valid_job_id,
+    iso_to_epoch,
+    model_voices_for_type,
+    normalize_hf_model_id,
+    normalize_model_type,
+    now_iso,
+    slugify,
+    split_text_into_chunks,
+    supports_generation_for_model_type,
+    validate_hf_model_id,
+    validate_output_directory,
+    voice_to_lang_code,
+)
 # Lazy-import heavy audio/torch libraries when necessary to allow test-mode
 # Lazy-import EPUB parsing and HTML parsing libraries when needed
 try:
@@ -55,51 +88,6 @@ except Exception as exc:
     HAS_KOKORO = False
     KOKORO_IMPORT_ERROR = str(exc)
 
-BASE_DIR = Path(__file__).resolve().parent
-APP_DATA_DIR = BASE_DIR / ".app_data"
-UPLOADS_DIR = APP_DATA_DIR / "uploads"
-JOB_META_DIR = APP_DATA_DIR / "jobs"
-DEFAULT_OUTPUT_DIR = BASE_DIR / "generated_audio"
-DEFAULT_HF_MODEL_CACHE_DIR = APP_DATA_DIR / "hf_models"
-ALLOWED_UPLOAD_EXTENSIONS = {".epub"}
-JOB_ID_RE = re.compile(r"^[a-f0-9]{32}$")
-HF_MODEL_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*(/[A-Za-z0-9][A-Za-z0-9._-]*)?$")
-HF_MODEL_CACHE_DIR_SEGMENT_RE = re.compile(r"[^A-Za-z0-9._-]+")
-
-VOICE_OPTIONS = [
-    "af_heart",
-    "af_bella",
-    "af_nicole",
-    "am_adam",
-    "am_michael",
-    "bf_emma",
-    "bm_george",
-    "ef_dora",
-    "ff_siwis",
-    "hf_alpha",
-    "if_sara",
-    "pf_dora",
-]
-
-LOCAL_DEFAULT_MODEL_ID = "__local_kokoro_default__"
-MODEL_TYPE_OPTIONS = {"kokoro", "other"}
-MODEL_TYPE_LABELS = {
-    "kokoro": "Kokoro",
-    "other": "Other",
-}
-MODEL_VOICE_OPTIONS = {
-    "kokoro": list(VOICE_OPTIONS),
-    "other": ["default"],
-}
-PREDEFINED_MODEL_CATALOG = [
-    {
-        "id": "hexgrad/Kokoro-82M",
-        "display_name": "Kokoro 82M (Hugging Face)",
-        "model_type": "kokoro",
-        "description": "Official Kokoro model repository.",
-    },
-]
-
 JOBS: Dict[str, Dict] = {}
 JOBS_LOCK = threading.Lock()
 WORKERS: Dict[str, threading.Thread] = {}
@@ -115,7 +103,6 @@ RATE_LIMIT_STATE: Dict[str, List[float]] = {}
 RATE_LIMIT_LOCK = threading.Lock()
 CLEANUP_LOCK = threading.Lock()
 CLEANUP_LAST_RUN = 0.0
-ACTIVE_JOB_STATUSES = {"queued", "running", "stopping"}
 MODEL_DOWNLOADS: Dict[str, Dict] = {}
 MODEL_DOWNLOADS_LOCK = threading.Lock()
 MODEL_DOWNLOAD_WORKERS: Dict[str, threading.Thread] = {}
@@ -124,17 +111,6 @@ MODEL_DOWNLOAD_WORKERS_LOCK = threading.Lock()
 
 class JobStopped(Exception):
     pass
-
-
-def max_upload_bytes_from_env() -> int:
-    default_mb = 50
-    raw = os.getenv("AUDIOBOOK_MAX_UPLOAD_MB", str(default_mb)).strip()
-    try:
-        mb = int(raw)
-    except ValueError:
-        mb = default_mb
-    mb = max(1, min(mb, 512))
-    return mb * 1024 * 1024
 
 app = Flask(__name__, template_folder="templates", static_folder="static")
 app.config["MAX_CONTENT_LENGTH"] = max_upload_bytes_from_env()
@@ -149,10 +125,6 @@ app.config["SESSION_COOKIE_SECURE"] = os.getenv("AUDIOBOOK_COOKIE_SECURE", "0").
 }
 
 
-def now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
-
-
 def ensure_app_dirs() -> None:
     APP_DATA_DIR.mkdir(parents=True, exist_ok=True)
     UPLOADS_DIR.mkdir(parents=True, exist_ok=True)
@@ -160,78 +132,6 @@ def ensure_app_dirs() -> None:
     DEFAULT_OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     get_hf_model_cache_root().mkdir(parents=True, exist_ok=True)
     maybe_cleanup_stale_data()
-
-
-def slugify(value: str, fallback: str = "untitled") -> str:
-    text = (value or "").strip().lower()
-    text = re.sub(r"[^a-z0-9]+", "_", text)
-    text = re.sub(r"_+", "_", text).strip("_")
-    return text or fallback
-
-
-def get_allowed_output_root() -> Tuple[Optional[Path], Optional[str]]:
-    root_text = os.getenv("AUDIOBOOK_ALLOWED_OUTPUT_ROOT", str(DEFAULT_OUTPUT_DIR))
-    root_path = Path(root_text).expanduser()
-    try:
-        resolved_root = root_path.resolve(strict=False)
-        resolved_root.mkdir(parents=True, exist_ok=True)
-    except Exception as exc:
-        return None, f"Configured output root is invalid: {exc}"
-    return resolved_root, None
-
-
-def validate_output_directory(path_text: str) -> Tuple[Optional[Path], Optional[str]]:
-    if not path_text or not str(path_text).strip():
-        return None, "Output directory is required."
-    output_dir = Path(path_text).expanduser()
-    try:
-        resolved_output = output_dir.resolve(strict=False)
-    except Exception as exc:
-        return None, f"Invalid output directory path: {exc}"
-    try:
-        resolved_output.mkdir(parents=True, exist_ok=True)
-    except Exception as exc:
-        return None, f"Unable to create output directory: {exc}"
-
-    if not os.access(resolved_output, os.W_OK):
-        return None, "Output directory is not writable."
-
-    return resolved_output, None
-
-
-def normalize_hf_model_id(raw_value: object) -> Optional[str]:
-    text = str(raw_value or "").strip()
-    return text or None
-
-
-def validate_hf_model_id(raw_value: object) -> Tuple[Optional[str], Optional[str]]:
-    model_id = normalize_hf_model_id(raw_value)
-    if model_id is None:
-        return None, None
-
-    if len(model_id) > 128:
-        return None, "Hugging Face model ID is too long."
-
-    if not HF_MODEL_ID_RE.fullmatch(model_id):
-        return None, "Hugging Face model ID must look like 'namespace/model' or 'model'."
-
-    return model_id, None
-
-
-def normalize_model_type(raw_value: object, default: str = "kokoro") -> str:
-    model_type = str(raw_value or "").strip().lower()
-    if model_type in MODEL_TYPE_OPTIONS:
-        return model_type
-    return default
-
-
-def supports_generation_for_model_type(model_type: str) -> bool:
-    return normalize_model_type(model_type) == "kokoro"
-
-
-def model_voices_for_type(model_type: str) -> List[str]:
-    normalized_type = normalize_model_type(model_type)
-    return list(MODEL_VOICE_OPTIONS.get(normalized_type, MODEL_VOICE_OPTIONS["other"]))
 
 
 def is_hf_model_cached(model_id: str) -> bool:
@@ -863,10 +763,6 @@ def validate_generated_file_request(job: Dict, filename: str) -> Tuple[Optional[
     return safe_name, None
 
 
-def is_valid_job_id(job_id: str) -> bool:
-    return bool(JOB_ID_RE.fullmatch((job_id or "").strip()))
-
-
 def estimate_generation_seconds(job: Dict, mode: str) -> int:
     chapters = job.get("chapters") or []
     chapter_count = max(1, len(chapters))
@@ -874,29 +770,6 @@ def estimate_generation_seconds(job: Dict, mode: str) -> int:
     mode_factor = 1 if mode == "single" else 2
     estimated = 15 + (chapter_count * (6 * mode_factor)) + int(total_chars / (900 / mode_factor))
     return max(15, estimated)
-
-
-def iso_to_epoch(value: Optional[str]) -> Optional[float]:
-    if not value:
-        return None
-
-    try:
-        normalized = str(value).replace("Z", "+00:00")
-        return datetime.fromisoformat(normalized).timestamp()
-    except Exception:
-        return None
-
-
-def calculate_elapsed_seconds(started_at: Optional[str], finished_at: Optional[str] = None) -> Optional[float]:
-    start_epoch = iso_to_epoch(started_at)
-    if start_epoch is None:
-        return None
-
-    end_epoch = iso_to_epoch(finished_at) if finished_at else time.time()
-    if end_epoch is None:
-        return None
-
-    return round(max(0.0, end_epoch - start_epoch), 1)
 
 
 def should_enable_cleanup() -> bool:
@@ -996,18 +869,6 @@ def client_identifier() -> str:
     return request.remote_addr or "unknown"
 
 
-def create_run_folder(output_dir: Path, base_name: str) -> Path:
-    stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    root = f"{slugify(base_name, fallback='audiobook')}_{stamp}"
-    run_dir = output_dir / root
-    suffix = 1
-    while run_dir.exists():
-        run_dir = output_dir / f"{root}_{suffix}"
-        suffix += 1
-    run_dir.mkdir(parents=True, exist_ok=False)
-    return run_dir
-
-
 def is_lfs_pointer(path: Path) -> bool:
     if not path.exists():
         return False
@@ -1099,42 +960,6 @@ def default_requested_device() -> str:
     return configured or "auto"
 
 
-def split_text_into_chunks(text: str, max_chars: int = 700) -> List[str]:
-    normalized = re.sub(r"\s+", " ", (text or "").strip())
-    if not normalized:
-        return []
-
-    chunks: List[str] = []
-    current = ""
-
-    for sentence in re.split(r"(?<=[.!?])\s+", normalized):
-        sentence = sentence.strip()
-        if not sentence:
-            continue
-
-        if len(sentence) > max_chars:
-            parts = [sentence[i : i + max_chars] for i in range(0, len(sentence), max_chars)]
-        else:
-            parts = [sentence]
-
-        for part in parts:
-            if not current:
-                current = part
-                continue
-
-            candidate = f"{current} {part}"
-            if len(candidate) <= max_chars:
-                current = candidate
-            else:
-                chunks.append(current)
-                current = part
-
-    if current:
-        chunks.append(current)
-
-    return chunks
-
-
 def is_test_mode() -> bool:
     val = os.getenv("AUDIOBOOK_TEST_MODE", "")
     return str(val).strip().lower() in {"1", "true", "yes", "on"}
@@ -1193,12 +1018,6 @@ def add_security_headers(response):
     if (request.headers.get("X-Forwarded-Proto") or "").strip().lower() == "https":
         response.headers.setdefault("Strict-Transport-Security", "max-age=31536000; includeSubDomains")
     return response
-
-
-def voice_to_lang_code(voice: str) -> str:
-    if "_" not in voice:
-        return "a"
-    return voice.split("_", 1)[0][0]
 
 
 def choose_voice_reference(voice: str) -> str:

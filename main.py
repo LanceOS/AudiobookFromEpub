@@ -46,6 +46,7 @@ from core.config import (
     VOICE_OPTIONS,
     max_upload_bytes_from_env,
 )
+from features import jobs as job_feature
 from services.epub_service import (
     _normalize_filter_level,
     _should_skip_chapter,
@@ -122,8 +123,7 @@ MODEL_DOWNLOAD_WORKERS: Dict[str, threading.Thread] = {}
 MODEL_DOWNLOAD_WORKERS_LOCK = threading.Lock()
 
 
-class JobStopped(Exception):
-    pass
+JobStopped = job_feature.JobStopped
 
 app = Flask(__name__, template_folder="templates", static_folder="static")
 app.config["MAX_CONTENT_LENGTH"] = max_upload_bytes_from_env()
@@ -1116,332 +1116,93 @@ def synthesize_text_to_wav(
     sf.write(str(output_path), combined, 24000)
 
 
-def save_job_snapshot(job_id: str) -> None:
-    with JOBS_LOCK:
-        job = JOBS.get(job_id)
-        if not job:
-            return
-        payload = dict(job)
-
-    out = JOB_META_DIR / f"{job_id}.json"
-    out.write_text(json.dumps(payload, indent=2), encoding="utf-8")
-
-
-def get_job(job_id: str) -> Optional[Dict]:
-    with JOBS_LOCK:
-        job = JOBS.get(job_id)
-        return dict(job) if job else None
-
-
-def update_job(job_id: str, **fields: object) -> None:
-    with JOBS_LOCK:
-        if job_id not in JOBS:
-            return
-        JOBS[job_id].update(fields)
-        JOBS[job_id]["updated_at"] = now_iso()
-
-    save_job_snapshot(job_id)
-
-
-def register_worker(job_id: str, worker: threading.Thread) -> None:
-    with WORKERS_LOCK:
-        WORKERS[job_id] = worker
-
-
-def unregister_worker(job_id: str, worker: Optional[threading.Thread] = None) -> None:
-    with WORKERS_LOCK:
-        current = WORKERS.get(job_id)
-        if current is None:
-            return
-        if worker is not None and current is not worker:
-            return
-        WORKERS.pop(job_id, None)
-
-
-def is_job_active(job_id: str, job: Optional[Dict] = None) -> bool:
-    current_job = job or get_job(job_id)
-
-    with WORKERS_LOCK:
-        worker = WORKERS.get(job_id)
-        if worker is None:
-            return False
-
-        if worker.is_alive():
-            return True
-
-        if current_job and current_job.get("status") in ACTIVE_JOB_STATUSES:
-            return True
-
-        WORKERS.pop(job_id, None)
-        return False
-
-
-def job_has_generated_output(job: Dict) -> bool:
-    if job.get("generated_files"):
-        return True
-
-    run_folder = str(job.get("run_folder") or "").strip()
-    if not run_folder:
-        return False
-
-    run_path = Path(run_folder)
-    return run_path.exists() and any(run_path.glob("*.wav"))
-
-
-def job_files_cleared(job: Dict) -> bool:
-    return bool(job.get("status") == "stopped" and job.get("stop_requested") and not job_has_generated_output(job))
-
-
-def can_clear_job_files(job: Dict) -> bool:
-    return bool(job.get("status") == "stopped" and not is_job_active(job["id"], job) and job_has_generated_output(job))
-
-
-def serialize_job_status(job: Dict) -> Dict:
-    elapsed_seconds = job.get("elapsed_seconds")
-    if elapsed_seconds is None and job.get("started_at"):
-        elapsed_seconds = calculate_elapsed_seconds(job.get("started_at"), job.get("finished_at"))
-
-    active = is_job_active(job["id"], job)
-
-    return {
-        "id": job["id"],
-        "status": job["status"],
-        "progress": job["progress"],
-        "message": job["message"],
-        "error": job["error"],
-        "started_at": job.get("started_at"),
-        "finished_at": job.get("finished_at"),
-        "elapsed_seconds": elapsed_seconds,
-        "estimated_seconds": job.get("estimated_seconds"),
-        "device": job.get("device") or job.get("config", {}).get("device", "auto"),
-        "hf_model_id": job.get("config", {}).get("hf_model_id"),
-        "model_id": job.get("config", {}).get("model_id") or LOCAL_DEFAULT_MODEL_ID,
-        "model_type": job.get("config", {}).get("model_type") or "kokoro",
-        "detected_title": job["detected_title"],
-        "chapters_count": job["chapters_count"],
-        "run_folder": job["run_folder"],
-        "updated_at": job["updated_at"],
-        "stop_requested": bool(job.get("stop_requested")),
-        "stop_requested_at": job.get("stop_requested_at"),
-        "active": active,
-        "can_stop": bool(job.get("status") in ACTIVE_JOB_STATUSES and active and not job.get("stop_requested")),
-        "can_clear_files": can_clear_job_files(job),
-        "files_cleared": job_files_cleared(job),
-    }
-
-
-def finalize_stopped_job(job_id: str, started_at: Optional[str], generated_files: List[str]) -> None:
-    job = get_job(job_id)
-    if not job:
-        return
-
-    files = list_generated_files(job)
-    final_files = [entry["name"] for entry in files] or list(generated_files)
-    progress = int(job.get("progress") or 0)
-    message = "Generation stopped."
-    if final_files:
-        message = f"Generation stopped. Kept {len(final_files)} generated file(s)."
-
-    update_job(
-        job_id,
-        status="stopped",
-        progress=min(100, max(progress, 0)),
-        message=message,
-        error=None,
-        finished_at=now_iso(),
-        elapsed_seconds=calculate_elapsed_seconds(started_at or job.get("started_at")),
-        generated_files=final_files,
+def _job_feature_deps() -> SimpleNamespace:
+    return SimpleNamespace(
+        ACTIVE_JOB_STATUSES=ACTIVE_JOB_STATUSES,
+        BASE_DIR=BASE_DIR,
+        JOBS=JOBS,
+        JOBS_LOCK=JOBS_LOCK,
+        JOB_META_DIR=JOB_META_DIR,
+        LOCAL_DEFAULT_MODEL_ID=LOCAL_DEFAULT_MODEL_ID,
+        WORKERS=WORKERS,
+        WORKERS_LOCK=WORKERS_LOCK,
+        calculate_elapsed_seconds=calculate_elapsed_seconds,
+        can_clear_job_files=can_clear_job_files,
+        create_run_folder=create_run_folder,
+        detect_device=detect_device,
+        extract_chapters_from_epub=extract_chapters_from_epub,
+        finalize_stopped_job=finalize_stopped_job,
+        get_job=get_job,
+        get_pipeline_bundle=get_pipeline_bundle,
+        is_job_active=is_job_active,
+        is_test_mode=is_test_mode,
+        list_generated_files=list_generated_files,
+        normalize_hf_model_id=normalize_hf_model_id,
+        now_iso=now_iso,
+        raise_if_stop_requested=raise_if_stop_requested,
+        save_job_snapshot=save_job_snapshot,
+        shutil=shutil,
+        slugify=slugify,
+        synthesize_text_to_wav=synthesize_text_to_wav,
+        unregister_worker=unregister_worker,
+        update_job=update_job,
     )
 
 
-def raise_if_stop_requested(job_id: str, started_at: Optional[str], generated_files: List[str]) -> None:
-    job = get_job(job_id)
-    if not job or not job.get("stop_requested"):
-        return
+def save_job_snapshot(job_id: str) -> None:
+    job_feature.save_job_snapshot(job_id, _job_feature_deps())
 
-    finalize_stopped_job(job_id, started_at, generated_files)
-    raise JobStopped()
+
+def get_job(job_id: str) -> Optional[Dict]:
+    return job_feature.get_job(job_id, _job_feature_deps())
+
+
+def update_job(job_id: str, **fields: object) -> None:
+    job_feature.update_job(job_id, _job_feature_deps(), **fields)
+
+
+def register_worker(job_id: str, worker: threading.Thread) -> None:
+    job_feature.register_worker(job_id, worker, _job_feature_deps())
+
+
+def unregister_worker(job_id: str, worker: Optional[threading.Thread] = None) -> None:
+    job_feature.unregister_worker(job_id, _job_feature_deps(), worker)
+
+
+def is_job_active(job_id: str, job: Optional[Dict] = None) -> bool:
+    return job_feature.is_job_active(job_id, _job_feature_deps(), job=job)
+
+
+def job_has_generated_output(job: Dict) -> bool:
+    return job_feature.job_has_generated_output(job)
+
+
+def job_files_cleared(job: Dict) -> bool:
+    return job_feature.job_files_cleared(job)
+
+
+def can_clear_job_files(job: Dict) -> bool:
+    return job_feature.can_clear_job_files(job, _job_feature_deps())
+
+
+def serialize_job_status(job: Dict) -> Dict:
+    return job_feature.serialize_job_status(job, _job_feature_deps())
+
+
+def finalize_stopped_job(job_id: str, started_at: Optional[str], generated_files: List[str]) -> None:
+    job_feature.finalize_stopped_job(job_id, started_at, generated_files, _job_feature_deps())
+
+
+def raise_if_stop_requested(job_id: str, started_at: Optional[str], generated_files: List[str]) -> None:
+    job_feature.raise_if_stop_requested(job_id, started_at, generated_files, _job_feature_deps())
 
 
 def list_generated_files(job: Dict) -> List[Dict]:
-    run_folder = job.get("run_folder")
-    if not run_folder:
-        return []
-
-    run_path = Path(run_folder)
-    if not run_path.exists():
-        return []
-
-    files: List[Dict] = []
-    for wav_path in sorted(run_path.glob("*.wav")):
-        stat = wav_path.stat()
-        files.append(
-            {
-                "name": wav_path.name,
-                "path": str(wav_path),
-                "size_bytes": stat.st_size,
-                "modified_at": datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc).isoformat(timespec="seconds"),
-                "url": f"/api/jobs/{job['id']}/file/{wav_path.name}",
-                "download_url": f"/api/jobs/{job['id']}/download/{wav_path.name}",
-            }
-        )
-
-    return files
+    return job_feature.list_generated_files(job)
 
 
 def run_generation_job(job_id: str) -> None:
-    job = get_job(job_id)
-    if not job:
-        return
-
-    started_at = now_iso()
-    generated_files: List[str] = []
-
-    try:
-        update_job(job_id, status="running", progress=5, message="Preparing generation job...", started_at=started_at)
-        raise_if_stop_requested(job_id, started_at, generated_files)
-
-        output_dir = Path(job["config"]["output_dir"])
-        run_folder = create_run_folder(output_dir, job["config"]["output_name"])
-        update_job(job_id, run_folder=str(run_folder), progress=15, message="Run folder created.")
-        raise_if_stop_requested(job_id, started_at, generated_files)
-
-        upload_path = Path(job["upload_path"])
-        voice = str(job["config"].get("voice", "af_heart"))
-        mode = str(job["config"].get("mode", "single"))
-        hf_model_id = normalize_hf_model_id(job["config"].get("hf_model_id"))
-        output_name = slugify(str(job["config"].get("output_name", "audiobook")), fallback="audiobook")
-        device = detect_device(str(job["config"].get("device", "cpu")))
-        update_job(job_id, device=device)
-
-        # Prefer pre-parsed chapters from the upload step to avoid re-parsing
-        chapters = job.get("chapters") or []
-        if not chapters:
-            chapters = extract_chapters_from_epub(upload_path)
-        total_chapters = len(chapters)
-        update_job(job_id, progress=25, message=f"Loaded {total_chapters} chapters from EPUB.")
-        raise_if_stop_requested(job_id, started_at, generated_files)
-
-        # Test-mode shortcut: copy a small bundled WAV instead of running Kokoro
-        if is_test_mode():
-            sample = BASE_DIR / "sample_kokoro_cpu.wav"
-            if not sample.exists():
-                raise RuntimeError("Test mode enabled but sample_kokoro_cpu.wav is missing")
-
-            update_job(job_id, progress=35, message="Test mode: preparing sample audio files...")
-
-            if mode == "single":
-                raise_if_stop_requested(job_id, started_at, generated_files)
-                out_path = run_folder / f"{output_name}.wav"
-                shutil.copyfile(str(sample), str(out_path))
-                generated_files.append(out_path.name)
-                raise_if_stop_requested(job_id, started_at, generated_files)
-                update_job(job_id, progress=95, message="Test-mode single file ready.")
-            else:
-                for idx, chapter in enumerate(chapters, start=1):
-                    raise_if_stop_requested(job_id, started_at, generated_files)
-                    chapter_slug = slugify(chapter["title"], fallback=f"chapter_{idx:03d}")
-                    out_path = run_folder / f"{idx:03d}_{chapter_slug}.wav"
-                    shutil.copyfile(str(sample), str(out_path))
-                    generated_files.append(out_path.name)
-                    raise_if_stop_requested(job_id, started_at, generated_files)
-                    prog = int(40 + idx / max(1, total_chapters) * 50)
-                    update_job(job_id, progress=prog, message=f"Test-mode chapter {idx}/{total_chapters} ready.")
-
-            raise_if_stop_requested(job_id, started_at, generated_files)
-            update_job(
-                job_id,
-                status="completed",
-                progress=100,
-                message=f"Test-mode generation complete. Created {len(generated_files)} file(s).",
-                generated_files=generated_files,
-                error=None,
-                finished_at=now_iso(),
-                elapsed_seconds=calculate_elapsed_seconds(started_at),
-            )
-            return
-
-        if hf_model_id:
-            update_job(job_id, progress=30, message=f"Preparing download for model '{hf_model_id}'...")
-
-            def report_download_progress(percent: int, message: str) -> None:
-                mapped_progress = 30 + int(max(0, min(100, percent)) * 15 / 100)
-                update_job(job_id, progress=min(45, mapped_progress), message=message)
-                raise_if_stop_requested(job_id, started_at, generated_files)
-
-            get_pipeline_bundle(
-                voice,
-                device,
-                hf_model_id=hf_model_id,
-                progress_callback=report_download_progress,
-            )
-            update_job(job_id, progress=45, message="Model ready. Generating files...")
-            raise_if_stop_requested(job_id, started_at, generated_files)
-
-        if mode == "single":
-            raise_if_stop_requested(job_id, started_at, generated_files)
-            combined_text = "\n\n".join(ch["text"] for ch in chapters)
-            out_path = run_folder / f"{output_name}.wav"
-            update_job(job_id, progress=45, message="Generating single audiobook file...")
-            synthesize_text_to_wav(
-                combined_text,
-                voice=voice,
-                output_path=out_path,
-                device=device,
-                hf_model_id=hf_model_id,
-            )
-            generated_files.append(out_path.name)
-            raise_if_stop_requested(job_id, started_at, generated_files)
-            update_job(job_id, progress=95, message="Single file generation complete.")
-        else:
-            for idx, chapter in enumerate(chapters, start=1):
-                raise_if_stop_requested(job_id, started_at, generated_files)
-                chapter_slug = slugify(chapter["title"], fallback=f"chapter_{idx:03d}")
-                out_path = run_folder / f"{idx:03d}_{chapter_slug}.wav"
-                base_progress = 45 if hf_model_id else 30
-                progress_span = 45 if hf_model_id else 60
-                progress_start = int(base_progress + (idx - 1) / total_chapters * progress_span)
-                update_job(
-                    job_id,
-                    progress=progress_start,
-                    message=f"Generating chapter {idx}/{total_chapters}: {chapter['title']}",
-                )
-                synthesize_text_to_wav(
-                    chapter["text"],
-                    voice=voice,
-                    output_path=out_path,
-                    device=device,
-                    hf_model_id=hf_model_id,
-                )
-                generated_files.append(out_path.name)
-                raise_if_stop_requested(job_id, started_at, generated_files)
-
-        raise_if_stop_requested(job_id, started_at, generated_files)
-        update_job(
-            job_id,
-            status="completed",
-            progress=100,
-            message=f"Generation complete. Created {len(generated_files)} file(s).",
-            generated_files=generated_files,
-            error=None,
-            finished_at=now_iso(),
-            elapsed_seconds=calculate_elapsed_seconds(started_at),
-        )
-    except JobStopped:
-        return
-    except Exception as exc:
-        logging.exception("Generation job failed: %s", exc)
-        update_job(
-            job_id,
-            status="failed",
-            progress=100,
-            message="Generation failed.",
-            error=str(exc),
-            finished_at=now_iso(),
-            elapsed_seconds=calculate_elapsed_seconds(started_at),
-        )
-    finally:
-        unregister_worker(job_id)
+    job_feature.run_generation_job(job_id, _job_feature_deps())
 
 
 ROUTE_DEPS = SimpleNamespace(

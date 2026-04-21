@@ -24,25 +24,34 @@ JOB_ID_RE = re.compile(r"^[a-f0-9]{32}$")
 HF_MODEL_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*(/[A-Za-z0-9][A-Za-z0-9._-]*)?$")
 HF_MODEL_CACHE_DIR_SEGMENT_RE = re.compile(r"[^A-Za-z0-9._-]+")
 
-VOICE_OPTIONS = [
-    "af_heart",
-    "af_bella",
-    "af_nicole",
-    "am_adam",
-    "am_michael",
-    "bf_emma",
-    "bm_george",
-    "ef_dora",
-    "ff_siwis",
-    "hf_alpha",
-    "if_sara",
-    "pf_dora",
+def discover_kokoro_voice_options() -> List[str]:
+    voices_dir = BASE_DIR / "Kokoro-82M" / "voices"
+    if not voices_dir.exists() or not voices_dir.is_dir():
+        return []
+
+    discovered = sorted({path.stem for path in voices_dir.glob("*.pt") if path.is_file() and path.stem})
+    return discovered
+
+
+KOKORO_VOICE_OPTIONS = discover_kokoro_voice_options()
+QWEN3_CUSTOMVOICE_MODEL_ID = "Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice"
+QWEN3_CUSTOMVOICE_SPEAKERS = [
+    "Vivian",
+    "Serena",
+    "Uncle_Fu",
+    "Dylan",
+    "Eric",
+    "Ryan",
+    "Aiden",
+    "Ono_Anna",
+    "Sohee",
 ]
 
 LOCAL_DEFAULT_MODEL_ID = "__local_kokoro_default__"
-MODEL_TYPE_OPTIONS = {"kokoro", "voxcpm2", "other"}
+MODEL_TYPE_OPTIONS = {"kokoro", "qwen3_customvoice", "voxcpm2", "other"}
 MODEL_TYPE_LABELS: Dict[str, str] = {
     "kokoro": "Kokoro",
+    "qwen3_customvoice": "Qwen3 CustomVoice",
     "voxcpm2": "VoxCPM2",
     "other": "Other",
 }
@@ -50,9 +59,15 @@ MODEL_TYPE_ALIASES = {
     "vox": "voxcpm2",
     "voxcpm2": "voxcpm2",
     "openbmb/voxcpm2": "voxcpm2",
+    "qwen": "qwen3_customvoice",
+    "qwen3": "qwen3_customvoice",
+    "qwen3_customvoice": "qwen3_customvoice",
+    "qwen3-customvoice": "qwen3_customvoice",
+    "qwen/qwen3-tts-12hz-1.7b-customvoice": "qwen3_customvoice",
 }
 MODEL_VOICE_OPTIONS: Dict[str, List[str]] = {
-    "kokoro": list(VOICE_OPTIONS),
+    "kokoro": list(KOKORO_VOICE_OPTIONS),
+    "qwen3_customvoice": list(QWEN3_CUSTOMVOICE_SPEAKERS),
     "voxcpm2": [],
     "other": [],
 }
@@ -62,8 +77,17 @@ PREDEFINED_MODEL_CATALOG = [
         "display_name": "Kokoro 82M (Hugging Face)",
         "model_type": "kokoro",
         "description": "Official Kokoro model repository.",
-        "voices": list(VOICE_OPTIONS),
-        "default_voice": VOICE_OPTIONS[0],
+        "voices": list(KOKORO_VOICE_OPTIONS),
+        "default_voice": KOKORO_VOICE_OPTIONS[0] if KOKORO_VOICE_OPTIONS else None,
+        "supports_generation": True,
+    },
+    {
+        "id": QWEN3_CUSTOMVOICE_MODEL_ID,
+        "display_name": "Qwen3 TTS 1.7B CustomVoice",
+        "model_type": "qwen3_customvoice",
+        "description": "Qwen3-TTS model with predefined multi-language speakers.",
+        "voices": list(QWEN3_CUSTOMVOICE_SPEAKERS),
+        "default_voice": QWEN3_CUSTOMVOICE_SPEAKERS[0],
         "supports_generation": True,
     },
 ]

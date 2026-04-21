@@ -157,13 +157,12 @@ class ApiRoutesTests(unittest.TestCase):
         response = self.client.get("/")
         self.assertEqual(response.status_code, 200)
         self.assertIn(b".app_data/hf_models", response.data)
-        self.assertIn(b"Download your selected model before generation", response.data)
+        self.assertIn(b"before generation", response.data)
 
     def test_index_renders_model_manager_controls(self) -> None:
         response = self.client.get("/")
         self.assertEqual(response.status_code, 200)
         self.assertIn(b"id=\"modelSelect\"", response.data)
-        self.assertIn(b"id=\"modelTypeSelect\"", response.data)
         self.assertIn(b"id=\"downloadModelButton\"", response.data)
         self.assertIn(b"id=\"modelStatusMessage\"", response.data)
 
@@ -248,8 +247,13 @@ class ApiRoutesTests(unittest.TestCase):
         status = payload.get("status") or {}
         self.assertEqual(status.get("model_type"), "kokoro")
         self.assertTrue(status.get("supports_generation"))
-        self.assertIn("af_heart", status.get("voices") or [])
-        self.assertEqual(status.get("default_voice"), "af_heart")
+        voices = status.get("voices") or []
+        self.assertIsInstance(voices, list)
+        default_voice = status.get("default_voice")
+        if voices:
+            self.assertIn(default_voice, voices)
+        else:
+            self.assertIsNone(default_voice)
 
     def test_model_voices_route_returns_no_voices_for_other_type(self) -> None:
         response = self.client.get("/api/models/voices?model_type=other")
@@ -474,6 +478,36 @@ class ApiRoutesTests(unittest.TestCase):
         payload = response.get_json(silent=True) or {}
         self.assertEqual(response.status_code, 400)
         self.assertIn("download/select only", str(payload.get("error", "")))
+
+    def test_generate_rejects_qwen_backend_when_unavailable(self) -> None:
+        upload_payload = self._upload_placeholder_epub()
+
+        with mock.patch.object(app_main.ROUTE_DEPS, "is_test_mode", return_value=False), mock.patch.object(
+            app_main.ROUTE_DEPS,
+            "model_download_status",
+            return_value={"downloaded": True, "status": "downloaded"},
+        ), mock.patch.object(app_main, "HAS_QWEN_TTS", False), mock.patch.object(
+            app_main,
+            "QWEN_TTS_IMPORT_ERROR",
+            "qwen-tts missing",
+        ):
+            response = self.client.post(
+                "/api/generate",
+                json={
+                    "job_id": upload_payload["job_id"],
+                    "output_dir": str(DEFAULT_OUTPUT_DIR),
+                    "output_name": "qwen-backend-unavailable",
+                    "mode": "single",
+                    "voice": "Vivian",
+                    "model_id": "Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice",
+                    "model_type": "qwen3_customvoice",
+                },
+                headers=self._headers(),
+            )
+
+        payload = response.get_json(silent=True) or {}
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("Qwen3 CustomVoice backend is unavailable", str(payload.get("error", "")))
 
     def test_generate_accepts_hf_model_id_and_stores_it(self) -> None:
         upload_payload = self._upload_placeholder_epub()

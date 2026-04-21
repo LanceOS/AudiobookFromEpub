@@ -143,13 +143,14 @@ class HelperFunctionTests(unittest.TestCase):
     def test_normalize_model_type_defaults_unknown_values(self) -> None:
         self.assertEqual(normalize_model_type("kokoro"), "kokoro")
         self.assertEqual(normalize_model_type("VOX"), "voxcpm2")
-        self.assertEqual(normalize_model_type("not-real"), "kokoro")
+        self.assertEqual(normalize_model_type("not-real"), "other")
 
     def test_model_voices_for_type_and_generation_support(self) -> None:
-        self.assertIn("af_heart", model_voices_for_type("kokoro"))
+        self.assertIsInstance(model_voices_for_type("kokoro"), list)
         self.assertEqual(model_voices_for_type("voxcpm2"), [])
         self.assertEqual(model_voices_for_type("other"), [])
         self.assertTrue(supports_generation_for_model_type("kokoro"))
+        self.assertTrue(supports_generation_for_model_type("qwen3_customvoice"))
         self.assertFalse(supports_generation_for_model_type("voxcpm2"))
         self.assertFalse(supports_generation_for_model_type("other"))
 
@@ -198,8 +199,13 @@ class HelperFunctionTests(unittest.TestCase):
     def test_model_voice_status_infers_type_for_predefined_model(self) -> None:
         payload = model_voice_status("hexgrad/Kokoro-82M", None)
         self.assertEqual(payload.get("model_type"), "kokoro")
-        self.assertIn("af_heart", payload.get("voices") or [])
-        self.assertEqual(payload.get("default_voice"), "af_heart")
+        voices = payload.get("voices") or []
+        self.assertIsInstance(voices, list)
+        default_voice = payload.get("default_voice")
+        if voices:
+            self.assertIn(default_voice, voices)
+        else:
+            self.assertIsNone(default_voice)
 
     def test_model_voice_status_uses_model_specific_voice_metadata(self) -> None:
         custom_entry = {
@@ -219,6 +225,49 @@ class HelperFunctionTests(unittest.TestCase):
         self.assertEqual(payload.get("voices"), ["speaker_a", "speaker_b"])
         self.assertEqual(payload.get("default_voice"), "speaker_a")
         self.assertFalse(payload.get("supports_generation"))
+
+    def test_discover_qwen_supported_speakers_deduplicates_and_preserves_order(self) -> None:
+        class FakeQwenModel:
+            load_calls = []
+
+            @classmethod
+            def from_pretrained(cls, load_target, **kwargs):
+                cls.load_calls.append((load_target, kwargs))
+                return cls()
+
+            def get_supported_speakers(self):
+                return ["Vivian", "Serena", "Vivian", "Ryan"]
+
+        with tempfile.TemporaryDirectory() as cache_dir:
+            cache_path = Path(cache_dir)
+            (cache_path / "weights.bin").write_bytes(b"model")
+
+            with mock.patch.object(app_main, "HAS_QWEN_TTS", True), mock.patch.object(
+                app_main,
+                "Qwen3TTSModel",
+                FakeQwenModel,
+            ), mock.patch.object(app_main, "get_hf_model_cache_path", return_value=cache_path):
+                speakers, default_speaker = app_main.discover_qwen_supported_speakers(
+                    "Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice"
+                )
+
+        self.assertEqual(speakers, ["Vivian", "Serena", "Ryan"])
+        self.assertEqual(default_speaker, "Vivian")
+        self.assertEqual(len(FakeQwenModel.load_calls), 1)
+
+    def test_model_voice_status_prefers_discovered_qwen_speakers(self) -> None:
+        with mock.patch.object(
+            app_main,
+            "discover_qwen_supported_speakers",
+            return_value=(["Vivian", "Vivian", "Serena"], "Vivian"),
+        ) as discover_mock:
+            payload = model_voice_status("Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice", "qwen3_customvoice")
+
+        discover_mock.assert_called_once_with("Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice", allow_download=False)
+        self.assertEqual(payload.get("model_type"), "qwen3_customvoice")
+        self.assertEqual(payload.get("voices"), ["Vivian", "Vivian", "Serena"])
+        self.assertEqual(payload.get("default_voice"), "Vivian")
+        self.assertTrue(payload.get("supports_generation"))
 
     def test_get_hf_model_cache_path_sanitizes_model_id(self) -> None:
         with mock.patch.object(app_main, "get_hf_model_cache_root", return_value=Path("/tmp/hf-cache")):
@@ -599,6 +648,51 @@ class HelperFunctionTests(unittest.TestCase):
                 )
 
         bundle_mock.assert_called_once_with("af_heart", "cpu", hf_model_id="org/model-d")
+
+    def test_synthesize_text_to_wav_uses_qwen_generate_custom_voice(self) -> None:
+        fake_model = mock.Mock()
+        fake_model.generate_custom_voice.side_effect = [
+            (np.array([0.1, -0.1], dtype=np.float32), 22050),
+            (np.array([0.2, -0.2], dtype=np.float32), 22050),
+        ]
+        bundle_mock = mock.Mock(return_value={"model": fake_model})
+        write_mock = mock.Mock()
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            output_path = Path(temp_dir) / "qwen.wav"
+
+            with mock.patch.object(
+                app_main,
+                "split_text_into_chunks",
+                return_value=["first chunk", "second chunk"],
+            ), mock.patch.object(app_main, "get_pipeline_bundle", bundle_mock), mock.patch.dict(
+                sys.modules,
+                {"soundfile": mock.Mock(write=write_mock)},
+            ):
+                synthesize_text_to_wav(
+                    "text",
+                    voice="Vivian",
+                    output_path=output_path,
+                    device="cpu",
+                    hf_model_id="Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice",
+                    model_type="qwen3_customvoice",
+                )
+
+        bundle_mock.assert_called_once_with(
+            "Vivian",
+            "cpu",
+            hf_model_id="Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice",
+            model_type="qwen3_customvoice",
+        )
+        self.assertEqual(fake_model.generate_custom_voice.call_count, 2)
+        self.assertEqual(fake_model.generate_custom_voice.call_args_list[0].kwargs.get("speaker"), "Vivian")
+        self.assertEqual(fake_model.generate_custom_voice.call_args_list[1].kwargs.get("speaker"), "Vivian")
+        self.assertTrue(write_mock.called)
+        self.assertEqual(write_mock.call_count, 1)
+        written_audio = write_mock.call_args.args[1]
+        self.assertIsInstance(written_audio, np.ndarray)
+        self.assertGreater(written_audio.size, 0)
+        self.assertEqual(write_mock.call_args.args[2], 22050)
 
     def test_voice_to_lang_code_parsing(self) -> None:
         self.assertEqual(voice_to_lang_code("af_heart"), "a")

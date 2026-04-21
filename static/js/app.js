@@ -14,7 +14,6 @@ const state = {
   modelDownloadPollTimer: null,
   modelDownloadTargetId: null,
   modelDownloadInFlight: false,
-  initialVoiceOptions: [],
 };
 
 const TERMINAL_STATUSES = new Set(["completed", "failed", "stopped"]);
@@ -40,14 +39,15 @@ function normalizedModelType(rawValue) {
   if (value === "vox") {
     return "voxcpm2";
   }
-  if (["kokoro", "voxcpm2", "other"].includes(value)) {
+  if (["kokoro", "qwen3_customvoice", "voxcpm2", "other"].includes(value)) {
     return value;
   }
-  return "kokoro";
+  return "other";
 }
 
 function modelTypeLabel(modelType) {
   const normalized = normalizedModelType(modelType);
+  if (normalized === "qwen3_customvoice") return "Qwen3 CustomVoice";
   if (normalized === "voxcpm2") return "VoxCPM2";
   if (normalized === "other") return "Other";
   return "Kokoro";
@@ -67,7 +67,7 @@ function normalizeModelEntry(rawEntry) {
   const supportsGeneration =
     rawEntry && rawEntry.supports_generation !== undefined
       ? Boolean(rawEntry.supports_generation)
-      : modelType === "kokoro";
+      : modelType === "kokoro" || modelType === "qwen3_customvoice";
   const voices = Array.isArray(rawEntry && rawEntry.voices) ? rawEntry.voices : [];
 
   return {
@@ -106,14 +106,6 @@ function upsertModelEntry(entry) {
 
 function currentSelectedModel() {
   return state.models.find((model) => model.id === state.selectedModelId) || null;
-}
-
-function captureInitialVoiceOptions() {
-  const voiceSelect = byId("voiceSelect");
-  if (!voiceSelect) return [];
-  return Array.from(voiceSelect.options)
-    .map((option) => String(option.value || option.textContent || "").trim())
-    .filter(Boolean);
 }
 
 function setModelStatusMessage(message) {
@@ -186,7 +178,7 @@ function modelReadinessMessage(model) {
   }
 
   if (!model.supports_generation) {
-    return "This model type is download/select only right now. Generation currently supports Kokoro models.";
+    return "This model type is download/select only right now.";
   }
 
   if (model.error) {
@@ -274,19 +266,16 @@ function renderVoiceOptions(voices, preferredVoice = "") {
 
 async function refreshVoicesForSelection(options = {}) {
   const model = currentSelectedModel();
-  const modelTypeSelect = byId("modelTypeSelect");
+  const hfModelId = byId("hfModelId");
   const voiceHint = byId("voiceHint");
   const voiceRefresh = byId("voiceRefreshHint");
 
-  if (!modelTypeSelect) return;
-  const requestedModelType = normalizedModelType(modelTypeSelect.value || (model && model.model_type) || "kokoro");
+  const manualModelId = String((hfModelId && hfModelId.value) || "").trim();
+  const requestedModelId = manualModelId || (model && model.id) || "";
 
   const params = new URLSearchParams();
-  if (model && model.id) {
-    params.set("model_id", model.id);
-  }
-  if (requestedModelType) {
-    params.set("model_type", requestedModelType);
+  if (requestedModelId) {
+    params.set("model_id", requestedModelId);
   }
 
   let voices = [];
@@ -307,17 +296,22 @@ async function refreshVoicesForSelection(options = {}) {
 
     upsertModelEntry({
       ...(model || {}),
+      id: String(voiceStatus.model_id || requestedModelId || (model && model.id) || "").trim(),
       ...voiceStatus,
-      model_type: String(voiceStatus.model_type || requestedModelType),
-      model_type_label: String(voiceStatus.model_type_label || modelTypeLabel(voiceStatus.model_type || requestedModelType)),
+      model_type: String(voiceStatus.model_type || (model && model.model_type) || "other"),
+      model_type_label: String(
+        voiceStatus.model_type_label || modelTypeLabel(voiceStatus.model_type || (model && model.model_type) || "other"),
+      ),
     });
+
+    if (requestedModelId && !state.selectedModelId) {
+      state.selectedModelId = requestedModelId;
+    }
   } catch (error) {
     const fallbackModel = currentSelectedModel();
     voices = Array.isArray(fallbackModel && fallbackModel.voices) && fallbackModel.voices.length
       ? fallbackModel.voices
-      : requestedModelType === "kokoro"
-        ? state.initialVoiceOptions
-        : [];
+      : [];
     defaultVoice = String((fallbackModel && fallbackModel.default_voice) || "").trim();
     console.warn("Failed to refresh voices:", error);
   }
@@ -340,15 +334,10 @@ async function refreshVoicesForSelection(options = {}) {
 async function syncModelControlsFromSelection() {
   const model = currentSelectedModel();
   const modelSelect = byId("modelSelect");
-  const modelTypeSelect = byId("modelTypeSelect");
   const hfModelId = byId("hfModelId");
 
   if (modelSelect && model) {
     modelSelect.value = model.id;
-  }
-
-  if (modelTypeSelect) {
-    modelTypeSelect.value = normalizedModelType(model && model.model_type);
   }
 
   if (hfModelId && model) {
@@ -442,14 +431,12 @@ async function downloadModel() {
   }
 
   const modelSelect = byId("modelSelect");
-  const modelTypeSelect = byId("modelTypeSelect");
   const hfModelId = byId("hfModelId");
   const downloadButton = byId("downloadModelButton");
 
   const selectedModelId = String((modelSelect && modelSelect.value) || state.selectedModelId || state.defaultModelId || "");
   const manualModelId = String((hfModelId && hfModelId.value) || "").trim();
   const requestedModelId = manualModelId || selectedModelId;
-  const requestedModelType = normalizedModelType((modelTypeSelect && modelTypeSelect.value) || "kokoro");
 
   if (!requestedModelId) {
     setModelStatusMessage("Select a model or enter a manual model ID before downloading.");
@@ -483,7 +470,6 @@ async function downloadModel() {
       },
       body: JSON.stringify({
         model_id: requestedModelId,
-        model_type: requestedModelType,
       }),
     });
 
@@ -999,9 +985,7 @@ async function generateAudio() {
   }
 
   const selectedModelId = (selectedModel && selectedModel.id) || state.defaultModelId || LOCAL_DEFAULT_MODEL_ID;
-  const modelType = normalizedModelType(
-    (selectedModel && selectedModel.model_type) || (byId("modelTypeSelect") && byId("modelTypeSelect").value),
-  );
+  const modelType = normalizedModelType((selectedModel && selectedModel.model_type) || "other");
   const hfModelId = selectedModelId === LOCAL_DEFAULT_MODEL_ID ? "" : selectedModelId;
   const voiceSelect = byId("voiceSelect");
   const voice = String((voiceSelect && voiceSelect.value) || (selectedModel && selectedModel.default_voice) || "").trim();
@@ -1052,7 +1036,6 @@ function bindEvents() {
   const fileInput = byId("epubFile");
   const generateButton = byId("generateButton");
   const modelSelect = byId("modelSelect");
-  const modelTypeSelect = byId("modelTypeSelect");
   const hfModelInput = byId("hfModelId");
   const downloadModelButton = byId("downloadModelButton");
 
@@ -1120,29 +1103,11 @@ function bindEvents() {
     });
   }
 
-  if (modelTypeSelect) {
-    modelTypeSelect.addEventListener("change", async () => {
-      const selected = currentSelectedModel();
-      const nextType = normalizedModelType(modelTypeSelect.value);
-      if (selected) {
-        upsertModelEntry({
-          ...selected,
-          model_type: nextType,
-          model_type_label: modelTypeLabel(nextType),
-        });
-      }
-
-      await refreshVoicesForSelection({ preferDefaultVoice: true });
-      setModelStatusMessage(modelReadinessMessage(currentSelectedModel()));
-      updateJobActions({ can_stop: false, can_clear_files: false, active: false, status: "idle" });
-    });
-  }
-
   if (hfModelInput) {
     hfModelInput.addEventListener("input", () => {
       const text = String(hfModelInput.value || "").trim();
       if (text) {
-        setModelStatusMessage("Manual model entered. Select a type and click Download Model.");
+        setModelStatusMessage("Manual model entered. Click Download Model to fetch and infer voices.");
         setModelDownloadProgress(0);
       } else {
         setModelStatusMessage(modelReadinessMessage(currentSelectedModel()));
@@ -1185,7 +1150,6 @@ function bindEvents() {
 
 async function initializeApp() {
   bindEvents();
-  state.initialVoiceOptions = captureInitialVoiceOptions();
   await refreshModelCatalog(false);
   renderFiles([]);
 }

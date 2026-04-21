@@ -48,7 +48,6 @@ from core.config import (
     MODEL_TYPE_LABELS,
     PREDEFINED_MODEL_CATALOG,
     UPLOADS_DIR,
-    VOICE_OPTIONS,
     max_upload_bytes_from_env,
 )
 from features import jobs as job_feature
@@ -109,6 +108,16 @@ except Exception as exc:
     HAS_KOKORO = False
     KOKORO_IMPORT_ERROR = str(exc)
 
+try:
+    from qwen_tts import Qwen3TTSModel  # type: ignore[reportMissingImports]
+
+    HAS_QWEN_TTS = True
+    QWEN_TTS_IMPORT_ERROR = ""
+except Exception as exc:
+    Qwen3TTSModel = None
+    HAS_QWEN_TTS = False
+    QWEN_TTS_IMPORT_ERROR = str(exc)
+
 JOBS: Dict[str, Dict] = {}
 JOBS_LOCK = threading.Lock()
 WORKERS: Dict[str, threading.Thread] = {}
@@ -166,6 +175,7 @@ def _model_feature_deps() -> SimpleNamespace:
         MODEL_TYPE_LABELS=MODEL_TYPE_LABELS,
         PREDEFINED_MODEL_CATALOG=PREDEFINED_MODEL_CATALOG,
         build_model_catalog_entry=build_model_catalog_entry,
+        discover_qwen_supported_speakers=discover_qwen_supported_speakers,
         download_hf_model_snapshot=download_hf_model_snapshot,
         find_predefined_model=find_predefined_model,
         get_hf_model_cache_path=get_hf_model_cache_path,
@@ -573,20 +583,46 @@ def choose_voice_reference(voice: str) -> str:
     return voice
 
 
+def ensure_generation_backend_ready(model_type: str) -> Optional[str]:
+    resolved_type = normalize_model_type(model_type, default="other")
+
+    if resolved_type == "kokoro" and not HAS_KOKORO:
+        return (
+            "Kokoro is unavailable in this Python environment "
+            f"({KOKORO_IMPORT_ERROR}). Activate kokoro_venv (Python 3.12) "
+            "and install requirements, or run in test mode with AUDIOBOOK_TEST_MODE=1."
+        )
+
+    if resolved_type == "qwen3_customvoice" and not HAS_QWEN_TTS:
+        return (
+            "Qwen3 CustomVoice backend is unavailable in this Python environment "
+            f"({QWEN_TTS_IMPORT_ERROR}). Install qwen-tts and its runtime dependencies, "
+            "or run in test mode with AUDIOBOOK_TEST_MODE=1."
+        )
+
+    return None
+
+
 def _synthesis_feature_deps() -> SimpleNamespace:
     return SimpleNamespace(
         BASE_DIR=BASE_DIR,
         HAS_KOKORO=HAS_KOKORO,
+        HAS_QWEN_TTS=HAS_QWEN_TTS,
         KModel=KModel,
         KPipeline=KPipeline,
+        Qwen3TTSModel=Qwen3TTSModel,
         KOKORO_IMPORT_ERROR=KOKORO_IMPORT_ERROR,
+        QWEN_TTS_IMPORT_ERROR=QWEN_TTS_IMPORT_ERROR,
         PIPELINE_CACHE=PIPELINE_CACHE,
         PIPELINE_LOCK=PIPELINE_LOCK,
         choose_voice_reference=choose_voice_reference,
         download_hf_model_snapshot=download_hf_model_snapshot,
+        get_hf_model_cache_path=get_hf_model_cache_path,
         get_pipeline_bundle=get_pipeline_bundle,
+        infer_model_type_for_model=infer_model_type_for_model,
         is_lfs_pointer=is_lfs_pointer,
         normalize_hf_model_id=normalize_hf_model_id,
+        normalize_model_type=normalize_model_type,
         resolve_local_kokoro_assets=resolve_local_kokoro_assets,
         split_text_into_chunks=split_text_into_chunks,
         voice_to_lang_code=voice_to_lang_code,
@@ -597,6 +633,7 @@ def get_pipeline_bundle(
     voice: str,
     device: str,
     hf_model_id: Optional[str] = None,
+    model_type: Optional[str] = None,
     progress_callback: Optional[Callable[[int, str], None]] = None,
 ) -> Dict:
     return synthesis_service.get_pipeline_bundle(
@@ -604,7 +641,22 @@ def get_pipeline_bundle(
         device,
         _synthesis_feature_deps(),
         hf_model_id=hf_model_id,
+        model_type=model_type,
         progress_callback=progress_callback,
+    )
+
+
+def discover_qwen_supported_speakers(
+    model_id: Optional[str],
+    *,
+    allow_download: bool = False,
+    device: str = "cpu",
+) -> Tuple[List[str], Optional[str]]:
+    return synthesis_service.discover_qwen_supported_speakers(
+        model_id,
+        _synthesis_feature_deps(),
+        allow_download=allow_download,
+        device=device,
     )
 
 
@@ -614,6 +666,7 @@ def synthesize_text_to_wav(
     output_path: Path,
     device: str = "cpu",
     hf_model_id: Optional[str] = None,
+    model_type: Optional[str] = None,
 ) -> None:
     synthesis_service.synthesize_text_to_wav(
         text,
@@ -622,6 +675,7 @@ def synthesize_text_to_wav(
         _synthesis_feature_deps(),
         device=device,
         hf_model_id=hf_model_id,
+        model_type=model_type,
     )
 
 
@@ -726,12 +780,12 @@ ROUTE_DEPS = SimpleNamespace(
     RATE_LIMIT_LOCK=RATE_LIMIT_LOCK,
     RATE_LIMIT_STATE=RATE_LIMIT_STATE,
     UPLOADS_DIR=UPLOADS_DIR,
-    VOICE_OPTIONS=VOICE_OPTIONS,
     can_clear_job_files=can_clear_job_files,
     client_identifier=client_identifier,
     default_requested_device=default_requested_device,
     detect_device=detect_device,
     device_resolution_note=device_resolution_note,
+    ensure_generation_backend_ready=ensure_generation_backend_ready,
     ensure_app_dirs=ensure_app_dirs,
     estimate_generation_seconds=estimate_generation_seconds,
     extract_book_title=extract_book_title,

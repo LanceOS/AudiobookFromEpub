@@ -7,10 +7,11 @@ def register_model_routes(app, deps: Any) -> None:
     @app.get("/api/models")
     def api_models():
         deps.ensure_app_dirs()
+        default_model = deps.model_download_status(deps.LOCAL_DEFAULT_MODEL_ID)
         return deps.jsonify(
             {
                 "default_model_id": deps.LOCAL_DEFAULT_MODEL_ID,
-                "default_model_type": "kokoro",
+                "default_model_type": str(default_model.get("model_type") or "kokoro"),
                 "models": deps.list_available_models(),
             }
         )
@@ -33,7 +34,7 @@ def register_model_routes(app, deps: Any) -> None:
 
         requested_type = deps.normalize_model_type(
             data.get("model_type"),
-            default=deps.infer_model_type_for_model(str(model_id), fallback="kokoro"),
+            default=deps.infer_model_type_for_model(str(model_id), fallback="other"),
         )
         status, started = deps.start_model_download(str(model_id), requested_type)
         return deps.jsonify({"ok": True, "started": started, "status": status}), (202 if started else 200)
@@ -53,7 +54,7 @@ def register_model_routes(app, deps: Any) -> None:
 
         model_type = deps.normalize_model_type(
             deps.request.args.get("model_type"),
-            default=deps.infer_model_type_for_model(model_id, fallback="kokoro"),
+            default=deps.infer_model_type_for_model(model_id, fallback="other"),
         )
         return deps.jsonify({"ok": True, "status": deps.model_download_status(model_id, model_type)})
 
@@ -68,7 +69,7 @@ def register_model_routes(app, deps: Any) -> None:
 
         requested_model_type = deps.request.args.get("model_type")
         if requested_model_id and not requested_model_type:
-            requested_model_type = deps.infer_model_type_for_model(requested_model_id, fallback="kokoro")
+            requested_model_type = deps.infer_model_type_for_model(requested_model_id, fallback="other")
 
         payload = deps.model_voice_status(requested_model_id, requested_model_type)
         return deps.jsonify({"ok": True, "status": payload})

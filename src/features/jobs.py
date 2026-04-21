@@ -202,8 +202,11 @@ def run_generation_job(job_id: str, deps: Any) -> None:
         deps.raise_if_stop_requested(job_id, started_at, generated_files)
 
         upload_path = Path(job["upload_path"])
-        voice = str(job["config"].get("voice", "af_heart"))
+        voice = str(job["config"].get("voice", "")).strip()
+        if not voice:
+            raise RuntimeError("No voice configured for this generation job.")
         mode = str(job["config"].get("mode", "single"))
+        model_type = str(job["config"].get("model_type", "kokoro"))
         hf_model_id = deps.normalize_hf_model_id(job["config"].get("hf_model_id"))
         output_name = deps.slugify(str(job["config"].get("output_name", "audiobook")), fallback="audiobook")
         device = deps.detect_device(str(job["config"].get("device", "cpu")))
@@ -266,6 +269,7 @@ def run_generation_job(job_id: str, deps: Any) -> None:
                 voice,
                 device,
                 hf_model_id=hf_model_id,
+                model_type=model_type,
                 progress_callback=report_download_progress,
             )
             deps.update_job(job_id, progress=45, message="Model ready. Generating files...")
@@ -282,6 +286,7 @@ def run_generation_job(job_id: str, deps: Any) -> None:
                 output_path=out_path,
                 device=device,
                 hf_model_id=hf_model_id,
+                model_type=model_type,
             )
             generated_files.append(out_path.name)
             deps.raise_if_stop_requested(job_id, started_at, generated_files)
@@ -305,6 +310,7 @@ def run_generation_job(job_id: str, deps: Any) -> None:
                     output_path=out_path,
                     device=device,
                     hf_model_id=hf_model_id,
+                    model_type=model_type,
                 )
                 generated_files.append(out_path.name)
                 deps.raise_if_stop_requested(job_id, started_at, generated_files)

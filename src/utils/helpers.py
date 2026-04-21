@@ -77,7 +77,7 @@ def validate_hf_model_id(raw_value: object) -> Tuple[Optional[str], Optional[str
     return model_id, None
 
 
-def normalize_model_type(raw_value: object, default: str = "kokoro") -> str:
+def normalize_model_type(raw_value: object, default: str = "other") -> str:
     model_type = str(raw_value or "").strip().lower()
     if model_type in MODEL_TYPE_ALIASES:
         return MODEL_TYPE_ALIASES[model_type]
@@ -87,7 +87,7 @@ def normalize_model_type(raw_value: object, default: str = "kokoro") -> str:
 
 
 def supports_generation_for_model_type(model_type: str) -> bool:
-    return normalize_model_type(model_type) == "kokoro"
+    return normalize_model_type(model_type) in {"kokoro", "qwen3_customvoice"}
 
 
 def model_voices_for_type(model_type: str) -> List[str]:

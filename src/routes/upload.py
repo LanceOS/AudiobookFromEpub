@@ -57,6 +57,9 @@ def register_upload_routes(app, deps: Any) -> None:
                 return deps.jsonify({"error": f"Failed to parse EPUB: {exc}"}), 400
 
         suggested_name = deps.slugify(detected_title, fallback="audiobook")
+        default_voice_status = deps.model_voice_status(deps.LOCAL_DEFAULT_MODEL_ID, "kokoro")
+        default_voices = list(default_voice_status.get("voices") or [])
+        default_voice = str(default_voice_status.get("default_voice") or "").strip() or (default_voices[0] if default_voices else "")
         job_payload = {
             "id": job_id,
             "created_at": deps.now_iso(),
@@ -81,7 +84,7 @@ def register_upload_routes(app, deps: Any) -> None:
                 "output_dir": str(deps.DEFAULT_OUTPUT_DIR),
                 "output_name": suggested_name,
                 "mode": "single",
-                "voice": "af_heart",
+                "voice": default_voice,
                 "device": "cpu",
                 "model_id": deps.LOCAL_DEFAULT_MODEL_ID,
                 "model_type": "kokoro",

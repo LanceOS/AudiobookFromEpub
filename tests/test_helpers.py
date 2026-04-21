@@ -404,8 +404,13 @@ class HelperFunctionTests(unittest.TestCase):
         # Ensure the test is isolated from any local `Kokoro-82M/voices` files
         # that may exist in the repository (e.g., CI or previous test setup).
         with tempfile.TemporaryDirectory() as tmpdir:
-            with mock.patch.object(app_main, "BASE_DIR", Path(tmpdir)):
+            # Patch `BASE_DIR` directly to avoid depending on repo voice files.
+            original_base = app_main.BASE_DIR
+            try:
+                app_main.BASE_DIR = Path(tmpdir)
                 self.assertEqual(choose_voice_reference("af_heart"), "af_heart")
+            finally:
+                app_main.BASE_DIR = original_base
 
     def test_is_lfs_pointer_detection(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

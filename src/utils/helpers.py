@@ -89,7 +89,7 @@ def supports_generation_for_model_type(model_type: str) -> bool:
 
 def model_voices_for_type(model_type: str) -> List[str]:
     normalized_type = normalize_model_type(model_type)
-    return list(MODEL_VOICE_OPTIONS.get(normalized_type, MODEL_VOICE_OPTIONS["other"]))
+    return list(MODEL_VOICE_OPTIONS.get(normalized_type, []))
 
 
 def is_valid_job_id(job_id: str) -> bool:

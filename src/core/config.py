@@ -47,7 +47,7 @@ MODEL_TYPE_LABELS: Dict[str, str] = {
 }
 MODEL_VOICE_OPTIONS: Dict[str, List[str]] = {
     "kokoro": list(VOICE_OPTIONS),
-    "other": ["default"],
+    "other": [],
 }
 PREDEFINED_MODEL_CATALOG = [
     {
@@ -55,6 +55,9 @@ PREDEFINED_MODEL_CATALOG = [
         "display_name": "Kokoro 82M (Hugging Face)",
         "model_type": "kokoro",
         "description": "Official Kokoro model repository.",
+        "voices": list(VOICE_OPTIONS),
+        "default_voice": VOICE_OPTIONS[0],
+        "supports_generation": True,
     },
 ]
 

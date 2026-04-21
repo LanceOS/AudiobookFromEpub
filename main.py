@@ -180,6 +180,7 @@ def _model_feature_deps() -> SimpleNamespace:
         make_manual_model_entry=make_manual_model_entry,
         merge_model_download_state=merge_model_download_state,
         model_voices_for_type=model_voices_for_type,
+        model_voice_status=model_voice_status,
         normalize_model_type=normalize_model_type,
         now_iso=now_iso,
         register_model_download_worker=register_model_download_worker,
@@ -201,6 +202,9 @@ def build_model_catalog_entry(
     *,
     description: str,
     predefined: bool,
+    voices: Optional[object] = None,
+    default_voice: Optional[object] = None,
+    supports_generation: Optional[bool] = None,
 ) -> Dict:
     return model_feature.build_model_catalog_entry(
         model_id,
@@ -209,6 +213,9 @@ def build_model_catalog_entry(
         _model_feature_deps(),
         description=description,
         predefined=predefined,
+        voices=voices,
+        default_voice=default_voice,
+        supports_generation=supports_generation,
     )
 
 
@@ -220,8 +227,22 @@ def find_predefined_model(model_id: str) -> Optional[Dict]:
     return model_feature.find_predefined_model(model_id, _model_feature_deps())
 
 
-def make_manual_model_entry(model_id: str, model_type: str) -> Dict:
-    return model_feature.make_manual_model_entry(model_id, model_type, _model_feature_deps())
+def make_manual_model_entry(
+    model_id: str,
+    model_type: str,
+    *,
+    voices: Optional[object] = None,
+    default_voice: Optional[object] = None,
+    supports_generation: Optional[bool] = None,
+) -> Dict:
+    return model_feature.make_manual_model_entry(
+        model_id,
+        model_type,
+        _model_feature_deps(),
+        voices=voices,
+        default_voice=default_voice,
+        supports_generation=supports_generation,
+    )
 
 
 def get_model_download_state(model_id: str) -> Optional[Dict]:

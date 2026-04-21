@@ -10,6 +10,20 @@ from pathlib import Path
 # Enable test mode so the app uses the bundled sample WAV instead of Kokoro
 os.environ.setdefault("AUDIOBOOK_TEST_MODE", "1")
 
+# Ensure a dummy Kokoro voice exists before importing `main` so the app
+# discovers at least one local voice for the built-in model during tests.
+repo_root = Path(__file__).resolve().parent
+kokoro_voices_dir = repo_root / "Kokoro-82M" / "voices"
+try:
+    kokoro_voices_dir.mkdir(parents=True, exist_ok=True)
+    dummy_voice = kokoro_voices_dir / "af_heart.pt"
+    if not dummy_voice.exists():
+        dummy_voice.write_text("dummy-voice-file", encoding="utf-8")
+except Exception:
+    # If we can't create files (CI restrictions), continue and let the test
+    # code attempt other fallbacks.
+    pass
+
 from main import DEFAULT_OUTPUT_DIR, app
 
 

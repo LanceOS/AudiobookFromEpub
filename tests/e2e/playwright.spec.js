@@ -281,7 +281,7 @@ test.describe('EPUB to Audiobook UI', () => {
 
     await page.selectOption('#modelSelect', OTHER_MODEL_ID);
     await expect(page.locator('#modelTypeSelect')).toHaveValue('voxcpm2');
-    await expect(page.locator('#voiceSelect')).toHaveValues(VOX_VOICES);
+    await expect(page.locator('#voiceSelect option')).toHaveText(VOX_VOICES);
     await expect(generateButton).toBeDisabled();
     await expect(page.locator('#generateDisabledReason')).toContainText('download/select only');
   });
@@ -336,14 +336,14 @@ test.describe('EPUB to Audiobook UI', () => {
 
     await page.goto(DEFAULT_BASE_URL);
     await expect(page.locator('#modelSelect option')).toHaveCount(2);
-    await expect(page.locator('#voiceSelect')).toHaveValues(DEFAULT_VOICES);
+    await expect(page.locator('#voiceSelect option')).toHaveText(DEFAULT_VOICES);
     await expect(page.locator('#voiceRefreshHint')).toBeHidden();
     await expect.poll(() => voiceRequestCount).toBe(1);
 
     await page.selectOption('#modelSelect', OTHER_MODEL_ID);
 
     await expect(page.locator('#modelTypeSelect')).toHaveValue('voxcpm2');
-    await expect(page.locator('#voiceSelect')).toHaveValues(VOX_VOICES);
+    await expect(page.locator('#voiceSelect option')).toHaveText(VOX_VOICES);
     await expect(page.locator('#voiceRefreshHint')).toBeHidden();
     await expect.poll(() => voiceRequestCount).toBe(2);
   });

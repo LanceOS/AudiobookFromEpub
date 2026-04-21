@@ -18,6 +18,10 @@ def save_job_snapshot(job_id: str, deps: Any) -> None:
             return
         payload = dict(job)
 
+    # Keep snapshots compact so terminal jobs do not retain full chapter text
+    # or other large transient fields on disk.
+    payload.pop("chapters", None)
+
     out = deps.JOB_META_DIR / f"{job_id}.json"
     out.write_text(json.dumps(payload, indent=2), encoding="utf-8")
 

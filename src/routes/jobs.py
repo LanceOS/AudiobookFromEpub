@@ -216,7 +216,6 @@ def register_job_routes(app, deps: Any) -> None:
             return deps.jsonify({"error": "Job not found."}), 404
 
         files = deps.list_generated_files(job)
-        deps.update_job(job_id, generated_files=[f["name"] for f in files])
 
         refreshed = deps.get_job(job_id)
         return deps.jsonify(

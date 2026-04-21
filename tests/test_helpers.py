@@ -707,10 +707,7 @@ class HelperFunctionTests(unittest.TestCase):
 
     def test_estimate_generation_seconds_varies_by_mode(self) -> None:
         job = {
-            "chapters": [
-                {"text": "a" * 400},
-                {"text": "b" * 400},
-            ]
+            "chapters_count": 2,
         }
         single = estimate_generation_seconds(job, "single")
         chapter = estimate_generation_seconds(job, "chapter")

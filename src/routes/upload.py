@@ -75,7 +75,6 @@ def register_upload_routes(app, deps: Any) -> None:
             "upload_path": str(upload_path),
             "detected_title": detected_title,
             "chapters_count": len(chapters),
-            "chapters": chapters,
             "run_folder": None,
             "generated_files": [],
             "stop_requested": False,

@@ -270,6 +270,11 @@ async function refreshVoicesForSelection(options = {}) {
   const voiceHint = byId("voiceHint");
   const voiceRefresh = byId("voiceRefreshHint");
 
+  // show spinner/hint while we fetch updated voices
+  if (voiceRefresh) {
+    voiceRefresh.hidden = false;
+  }
+
   const manualModelId = String((hfModelId && hfModelId.value) || "").trim();
   const requestedModelId = manualModelId || (model && model.id) || "";
 

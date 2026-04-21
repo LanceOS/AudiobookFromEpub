@@ -400,8 +400,17 @@ def validate_generated_file_request(job: Dict, filename: str) -> Tuple[Optional[
 
 def estimate_generation_seconds(job: Dict, mode: str) -> int:
     chapters = job.get("chapters") or []
-    chapter_count = max(1, len(chapters))
+    chapter_count = len(chapters)
+    if chapter_count <= 0:
+        try:
+            chapter_count = int(job.get("chapters_count") or 0)
+        except (TypeError, ValueError):
+            chapter_count = 0
+
+    chapter_count = max(1, chapter_count)
     total_chars = sum(len(str(chapter.get("text", ""))) for chapter in chapters)
+    if total_chars <= 0:
+        total_chars = chapter_count * 1800
     mode_factor = 1 if mode == "single" else 2
     estimated = 15 + (chapter_count * (6 * mode_factor)) + int(total_chars / (900 / mode_factor))
     return max(15, estimated)

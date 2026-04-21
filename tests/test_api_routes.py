@@ -10,6 +10,7 @@ import unittest
 from io import BytesIO
 from pathlib import Path
 from unittest import mock
+import zipfile
 
 os.environ.setdefault("AUDIOBOOK_TEST_MODE", "1")
 
@@ -30,6 +31,55 @@ from main import (  # type: ignore[reportMissingImports]
     WORKERS_LOCK,
     app,
 )
+
+
+def _build_minimal_epub_bytes() -> bytes:
+        buffer = BytesIO()
+        with zipfile.ZipFile(buffer, "w") as archive:
+                archive.writestr("mimetype", "application/epub+zip", compress_type=zipfile.ZIP_STORED)
+                archive.writestr(
+                        "META-INF/container.xml",
+                        """<?xml version="1.0" encoding="UTF-8"?>
+<container version="1.0" xmlns="urn:oasis:names:tc:opendocument:xmlns:container">
+    <rootfiles>
+        <rootfile full-path="OEBPS/content.opf" media-type="application/oebps-package+xml" />
+    </rootfiles>
+</container>
+""",
+                )
+                archive.writestr(
+                        "OEBPS/content.opf",
+                        """<?xml version="1.0" encoding="UTF-8"?>
+<package xmlns="http://www.idpf.org/2007/opf" unique-identifier="BookId" version="3.0" xml:lang="en">
+    <metadata xmlns:dc="http://purl.org/dc/elements/1.1/">
+        <dc:identifier id="BookId">urn:uuid:12345678-1234-5678-1234-567812345678</dc:identifier>
+        <dc:title>Fixture Book</dc:title>
+        <dc:language>en</dc:language>
+    </metadata>
+    <manifest>
+        <item id="chapter1" href="chap1.xhtml" media-type="application/xhtml+xml"/>
+    </manifest>
+    <spine>
+        <itemref idref="chapter1"/>
+    </spine>
+</package>
+""",
+                )
+                archive.writestr(
+                        "OEBPS/chap1.xhtml",
+                        """<?xml version="1.0" encoding="UTF-8"?>
+<html xmlns="http://www.w3.org/1999/xhtml">
+    <head>
+        <title>Chapter 1</title>
+    </head>
+    <body>
+        <h1>Chapter 1</h1>
+        <p>This is a minimal valid EPUB fixture used by the API tests.</p>
+    </body>
+</html>
+""",
+                )
+        return buffer.getvalue()
 
 
 class ApiRoutesTests(unittest.TestCase):
@@ -72,7 +122,7 @@ class ApiRoutesTests(unittest.TestCase):
     def _upload_placeholder_epub(self, filename: str = "fixture.epub") -> dict[str, object]:
         response = self.client.post(
             "/api/upload",
-            data={"epub": (BytesIO(b"placeholder epub bytes"), filename)},
+            data={"epub": (BytesIO(_build_minimal_epub_bytes()), filename)},
             headers=self._headers(),
             content_type="multipart/form-data",
         )
@@ -165,6 +215,31 @@ class ApiRoutesTests(unittest.TestCase):
         self.assertIn(b"id=\"modelSelect\"", response.data)
         self.assertIn(b"id=\"downloadModelButton\"", response.data)
         self.assertIn(b"id=\"modelStatusMessage\"", response.data)
+
+    def test_upload_route_does_not_store_chapter_text_in_job_record(self) -> None:
+        payload = self._upload_placeholder_epub()
+        job_id = str(payload["job_id"])
+
+        with JOBS_LOCK:
+            job = dict(JOBS[job_id])
+
+        self.assertEqual(job.get("chapters_count"), payload.get("chapters_count"))
+        self.assertNotIn("chapters", job)
+
+    def test_job_files_route_is_read_only(self) -> None:
+        job_id, _ = self._generate_single_file_job()
+
+        with JOBS_LOCK:
+            JOBS[job_id]["generated_files"] = []
+
+        response = self.client.get(f"/api/jobs/{job_id}/files")
+        payload = response.get_json(silent=True) or {}
+
+        self.assertEqual(response.status_code, 200, payload)
+        self.assertGreaterEqual(len(payload.get("files") or []), 1)
+
+        with JOBS_LOCK:
+            self.assertEqual(JOBS[job_id].get("generated_files"), [])
 
     def test_health_route_returns_ok_json(self) -> None:
         response = self.client.get("/health")

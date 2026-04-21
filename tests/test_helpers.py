@@ -142,13 +142,15 @@ class HelperFunctionTests(unittest.TestCase):
 
     def test_normalize_model_type_defaults_unknown_values(self) -> None:
         self.assertEqual(normalize_model_type("kokoro"), "kokoro")
-        self.assertEqual(normalize_model_type("VOX"), "kokoro")
+        self.assertEqual(normalize_model_type("VOX"), "voxcpm2")
         self.assertEqual(normalize_model_type("not-real"), "kokoro")
 
     def test_model_voices_for_type_and_generation_support(self) -> None:
         self.assertIn("af_heart", model_voices_for_type("kokoro"))
+        self.assertEqual(model_voices_for_type("voxcpm2"), [])
         self.assertEqual(model_voices_for_type("other"), [])
         self.assertTrue(supports_generation_for_model_type("kokoro"))
+        self.assertFalse(supports_generation_for_model_type("voxcpm2"))
         self.assertFalse(supports_generation_for_model_type("other"))
 
     def test_list_available_models_contains_expected_entries(self) -> None:
@@ -186,6 +188,13 @@ class HelperFunctionTests(unittest.TestCase):
         self.assertIsNone(payload.get("default_voice"))
         self.assertFalse(payload.get("supports_generation"))
 
+    def test_model_voice_status_infers_voxcpm2_for_model_id_alias(self) -> None:
+        payload = model_voice_status("openbmb/VoxCPM2", None)
+        self.assertEqual(payload.get("model_type"), "voxcpm2")
+        self.assertEqual(payload.get("model_type_label"), "VoxCPM2")
+        self.assertEqual(payload.get("voices"), [])
+        self.assertIsNone(payload.get("default_voice"))
+
     def test_model_voice_status_infers_type_for_predefined_model(self) -> None:
         payload = model_voice_status("hexgrad/Kokoro-82M", None)
         self.assertEqual(payload.get("model_type"), "kokoro")
@@ -196,16 +205,17 @@ class HelperFunctionTests(unittest.TestCase):
         custom_entry = {
             "id": "openbmb/VoxCPM2",
             "display_name": "VoxCPM2",
-            "model_type": "other",
-            "model_type_label": "Other",
+            "model_type": "voxcpm2",
+            "model_type_label": "VoxCPM2",
             "voices": ["speaker_a", "speaker_b"],
             "supports_generation": False,
         }
 
         with mock.patch.object(app_main, "get_model_catalog_entry", return_value=custom_entry):
-            payload = model_voice_status("openbmb/VoxCPM2", "other")
+            payload = model_voice_status("openbmb/VoxCPM2", "voxcpm2")
 
-        self.assertEqual(payload.get("model_type"), "other")
+        self.assertEqual(payload.get("model_type"), "voxcpm2")
+        self.assertEqual(payload.get("model_type_label"), "VoxCPM2")
         self.assertEqual(payload.get("voices"), ["speaker_a", "speaker_b"])
         self.assertEqual(payload.get("default_voice"), "speaker_a")
         self.assertFalse(payload.get("supports_generation"))

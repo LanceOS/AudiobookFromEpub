@@ -308,7 +308,7 @@ def get_model_catalog_entry(model_id: str, deps: Any, model_type: Optional[str] 
         if str(entry.get("id", "")).strip() == model_id:
             return dict(entry)
 
-    fallback_type = deps.normalize_model_type(model_type or "kokoro")
+    fallback_type = deps.infer_model_type_for_model(model_id, fallback=model_type or "kokoro")
     return deps.make_manual_model_entry(model_id, fallback_type)
 
 
@@ -493,6 +493,10 @@ def is_model_download_active(model_id: str, deps: Any) -> bool:
 
 
 def infer_model_type_for_model(model_id: str, deps: Any, fallback: str = "kokoro") -> str:
+    aliased_type = deps.normalize_model_type(model_id, default="")
+    if aliased_type:
+        return deps.normalize_model_type(aliased_type, default=fallback)
+
     predefined = deps.find_predefined_model(model_id)
     if predefined:
         return deps.normalize_model_type(predefined.get("model_type"), default=fallback)

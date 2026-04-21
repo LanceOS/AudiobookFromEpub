@@ -42,8 +42,8 @@ function mockModelCatalog() {
         id: OTHER_MODEL_ID,
         display_name: 'Vox CPM 2',
         description: 'Alternative model repository.',
-        model_type: 'other',
-        model_type_label: 'Other',
+        model_type: 'voxcpm2',
+        model_type_label: 'VoxCPM2',
         predefined: true,
         download_required: true,
         downloaded: true,
@@ -57,7 +57,7 @@ function mockModelCatalog() {
 }
 
 function mockVoiceStatus(modelType) {
-  const normalizedType = modelType === 'vox' ? 'vox' : modelType === 'other' ? 'other' : 'kokoro';
+  const normalizedType = modelType === 'voxcpm2' || modelType === 'vox' ? 'voxcpm2' : modelType === 'other' ? 'other' : 'kokoro';
   const supportsGeneration = normalizedType === 'kokoro';
 
   return {
@@ -66,7 +66,7 @@ function mockVoiceStatus(modelType) {
       display_name: 'Kokoro 82M (Hugging Face)',
       description: 'Official Kokoro model repository.',
       model_type: normalizedType,
-      model_type_label: normalizedType === 'vox' ? 'Vox' : normalizedType === 'other' ? 'Other' : 'Kokoro',
+      model_type_label: normalizedType === 'voxcpm2' ? 'VoxCPM2' : normalizedType === 'other' ? 'Other' : 'Kokoro',
       predefined: true,
       download_required: false,
       downloaded: true,
@@ -280,6 +280,7 @@ test.describe('EPUB to Audiobook UI', () => {
     await expect(generateButton).toBeEnabled();
 
     await page.selectOption('#modelSelect', OTHER_MODEL_ID);
+    await expect(page.locator('#modelTypeSelect')).toHaveValue('voxcpm2');
     await expect(page.locator('#voiceSelect')).toHaveValues(VOX_VOICES);
     await expect(generateButton).toBeDisabled();
     await expect(page.locator('#generateDisabledReason')).toContainText('download/select only');
@@ -311,8 +312,8 @@ test.describe('EPUB to Audiobook UI', () => {
               id: OTHER_MODEL_ID,
               display_name: 'Vox CPM 2',
               description: 'Alternative model repository.',
-              model_type: 'other',
-              model_type_label: 'Other',
+              model_type: 'voxcpm2',
+              model_type_label: 'VoxCPM2',
               predefined: true,
               download_required: true,
               downloaded: false,
@@ -341,7 +342,7 @@ test.describe('EPUB to Audiobook UI', () => {
 
     await page.selectOption('#modelSelect', OTHER_MODEL_ID);
 
-    await expect(page.locator('#modelTypeSelect')).toHaveValue('other');
+    await expect(page.locator('#modelTypeSelect')).toHaveValue('voxcpm2');
     await expect(page.locator('#voiceSelect')).toHaveValues(VOX_VOICES);
     await expect(page.locator('#voiceRefreshHint')).toBeHidden();
     await expect.poll(() => voiceRequestCount).toBe(2);

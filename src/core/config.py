@@ -40,13 +40,20 @@ VOICE_OPTIONS = [
 ]
 
 LOCAL_DEFAULT_MODEL_ID = "__local_kokoro_default__"
-MODEL_TYPE_OPTIONS = {"kokoro", "other"}
+MODEL_TYPE_OPTIONS = {"kokoro", "voxcpm2", "other"}
 MODEL_TYPE_LABELS: Dict[str, str] = {
     "kokoro": "Kokoro",
+    "voxcpm2": "VoxCPM2",
     "other": "Other",
+}
+MODEL_TYPE_ALIASES = {
+    "vox": "voxcpm2",
+    "voxcpm2": "voxcpm2",
+    "openbmb/voxcpm2": "voxcpm2",
 }
 MODEL_VOICE_OPTIONS: Dict[str, List[str]] = {
     "kokoro": list(VOICE_OPTIONS),
+    "voxcpm2": [],
     "other": [],
 }
 PREDEFINED_MODEL_CATALOG = [

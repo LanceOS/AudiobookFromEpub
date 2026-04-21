@@ -37,7 +37,10 @@ function selectedMode() {
 
 function normalizedModelType(rawValue) {
   const value = String(rawValue || "").trim().toLowerCase();
-  if (["kokoro", "other"].includes(value)) {
+  if (value === "vox") {
+    return "voxcpm2";
+  }
+  if (["kokoro", "voxcpm2", "other"].includes(value)) {
     return value;
   }
   return "kokoro";
@@ -45,6 +48,7 @@ function normalizedModelType(rawValue) {
 
 function modelTypeLabel(modelType) {
   const normalized = normalizedModelType(modelType);
+  if (normalized === "voxcpm2") return "VoxCPM2";
   if (normalized === "other") return "Other";
   return "Kokoro";
 }

@@ -262,23 +262,34 @@ class ApiRoutesTests(unittest.TestCase):
         self.assertEqual(status.get("voices"), [])
         self.assertIsNone(status.get("default_voice"))
 
+    def test_model_voices_route_infers_voxcpm2_for_model_id_alias(self) -> None:
+        response = self.client.get("/api/models/voices?model_id=openbmb/VoxCPM2")
+        payload = response.get_json(silent=True) or {}
+
+        self.assertEqual(response.status_code, 200, payload)
+        status = payload.get("status") or {}
+        self.assertEqual(status.get("model_type"), "voxcpm2")
+        self.assertEqual(status.get("model_type_label"), "VoxCPM2")
+        self.assertFalse(status.get("supports_generation"))
+
     def test_model_voices_route_uses_model_specific_voice_metadata(self) -> None:
         custom_entry = {
             "id": "openbmb/VoxCPM2",
             "display_name": "VoxCPM2",
-            "model_type": "other",
-            "model_type_label": "Other",
+            "model_type": "voxcpm2",
+            "model_type_label": "VoxCPM2",
             "voices": ["speaker_a", "speaker_b"],
             "supports_generation": False,
         }
 
         with mock.patch.object(app_main, "get_model_catalog_entry", return_value=custom_entry):
-            response = self.client.get("/api/models/voices?model_id=openbmb/VoxCPM2&model_type=other")
+            response = self.client.get("/api/models/voices?model_id=openbmb/VoxCPM2&model_type=voxcpm2")
 
         payload = response.get_json(silent=True) or {}
         self.assertEqual(response.status_code, 200, payload)
         status = payload.get("status") or {}
-        self.assertEqual(status.get("model_type"), "other")
+        self.assertEqual(status.get("model_type"), "voxcpm2")
+        self.assertEqual(status.get("model_type_label"), "VoxCPM2")
         self.assertEqual(status.get("voices"), ["speaker_a", "speaker_b"])
         self.assertEqual(status.get("default_voice"), "speaker_a")
         self.assertFalse(status.get("supports_generation"))
@@ -429,8 +440,8 @@ class ApiRoutesTests(unittest.TestCase):
         upload_payload = self._upload_placeholder_epub()
         catalog_entry = {
             "model_id": "openbmb/VoxCPM2",
-            "model_type": "other",
-            "model_type_label": "Other",
+            "model_type": "voxcpm2",
+            "model_type_label": "VoxCPM2",
             "voices": ["speaker_a"],
             "default_voice": "speaker_a",
             "supports_generation": False,
@@ -455,7 +466,7 @@ class ApiRoutesTests(unittest.TestCase):
                     "mode": "single",
                     "voice": "speaker_a",
                     "model_id": "openbmb/VoxCPM2",
-                    "model_type": "other",
+                    "model_type": "voxcpm2",
                 },
                 headers=self._headers(),
             )

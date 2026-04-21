@@ -401,7 +401,11 @@ class HelperFunctionTests(unittest.TestCase):
         )
 
     def test_choose_voice_reference_returns_voice_when_local_file_missing(self) -> None:
-        self.assertEqual(choose_voice_reference("af_heart"), "af_heart")
+        # Ensure the test is isolated from any local `Kokoro-82M/voices` files
+        # that may exist in the repository (e.g., CI or previous test setup).
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with mock.patch.object(app_main, "BASE_DIR", Path(tmpdir)):
+                self.assertEqual(choose_voice_reference("af_heart"), "af_heart")
 
     def test_is_lfs_pointer_detection(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

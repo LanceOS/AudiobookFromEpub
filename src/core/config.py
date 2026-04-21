@@ -40,14 +40,21 @@ VOICE_OPTIONS = [
 ]
 
 LOCAL_DEFAULT_MODEL_ID = "__local_kokoro_default__"
-MODEL_TYPE_OPTIONS = {"kokoro", "other"}
+MODEL_TYPE_OPTIONS = {"kokoro", "voxcpm2", "other"}
 MODEL_TYPE_LABELS: Dict[str, str] = {
     "kokoro": "Kokoro",
+    "voxcpm2": "VoxCPM2",
     "other": "Other",
+}
+MODEL_TYPE_ALIASES = {
+    "vox": "voxcpm2",
+    "voxcpm2": "voxcpm2",
+    "openbmb/voxcpm2": "voxcpm2",
 }
 MODEL_VOICE_OPTIONS: Dict[str, List[str]] = {
     "kokoro": list(VOICE_OPTIONS),
-    "other": ["default"],
+    "voxcpm2": [],
+    "other": [],
 }
 PREDEFINED_MODEL_CATALOG = [
     {
@@ -55,6 +62,9 @@ PREDEFINED_MODEL_CATALOG = [
         "display_name": "Kokoro 82M (Hugging Face)",
         "model_type": "kokoro",
         "description": "Official Kokoro model repository.",
+        "voices": list(VOICE_OPTIONS),
+        "default_voice": VOICE_OPTIONS[0],
+        "supports_generation": True,
     },
 ]
 

@@ -15,7 +15,7 @@ def register_ui_routes(app, deps: Any) -> None:
             "index.html",
             default_output_dir=str(allowed_root or deps.DEFAULT_OUTPUT_DIR),
             csrf_token=deps.get_csrf_token(),
-            voices=deps.VOICE_OPTIONS,
+            voices=deps.model_voice_status(deps.LOCAL_DEFAULT_MODEL_ID, "kokoro").get("voices") or deps.VOICE_OPTIONS,
             detected_device=detected_device,
             detected_device_note=detected_device_note,
         )

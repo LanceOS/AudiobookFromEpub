@@ -11,6 +11,7 @@ from core.config import (
     DEFAULT_OUTPUT_DIR,
     HF_MODEL_ID_RE,
     JOB_ID_RE,
+    MODEL_TYPE_ALIASES,
     MODEL_TYPE_OPTIONS,
     MODEL_VOICE_OPTIONS,
 )
@@ -78,6 +79,8 @@ def validate_hf_model_id(raw_value: object) -> Tuple[Optional[str], Optional[str
 
 def normalize_model_type(raw_value: object, default: str = "kokoro") -> str:
     model_type = str(raw_value or "").strip().lower()
+    if model_type in MODEL_TYPE_ALIASES:
+        return MODEL_TYPE_ALIASES[model_type]
     if model_type in MODEL_TYPE_OPTIONS:
         return model_type
     return default
@@ -89,7 +92,7 @@ def supports_generation_for_model_type(model_type: str) -> bool:
 
 def model_voices_for_type(model_type: str) -> List[str]:
     normalized_type = normalize_model_type(model_type)
-    return list(MODEL_VOICE_OPTIONS.get(normalized_type, MODEL_VOICE_OPTIONS["other"]))
+    return list(MODEL_VOICE_OPTIONS.get(normalized_type, []))
 
 
 def is_valid_job_id(job_id: str) -> bool:

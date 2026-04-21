@@ -249,8 +249,9 @@ class ApiRoutesTests(unittest.TestCase):
         self.assertEqual(status.get("model_type"), "kokoro")
         self.assertTrue(status.get("supports_generation"))
         self.assertIn("af_heart", status.get("voices") or [])
+        self.assertEqual(status.get("default_voice"), "af_heart")
 
-    def test_model_voices_route_returns_default_voice_for_other_type(self) -> None:
+    def test_model_voices_route_returns_no_voices_for_other_type(self) -> None:
         response = self.client.get("/api/models/voices?model_type=other")
         payload = response.get_json(silent=True) or {}
 
@@ -258,7 +259,40 @@ class ApiRoutesTests(unittest.TestCase):
         status = payload.get("status") or {}
         self.assertEqual(status.get("model_type"), "other")
         self.assertFalse(status.get("supports_generation"))
-        self.assertEqual(status.get("voices"), ["default"])
+        self.assertEqual(status.get("voices"), [])
+        self.assertIsNone(status.get("default_voice"))
+
+    def test_model_voices_route_infers_voxcpm2_for_model_id_alias(self) -> None:
+        response = self.client.get("/api/models/voices?model_id=openbmb/VoxCPM2")
+        payload = response.get_json(silent=True) or {}
+
+        self.assertEqual(response.status_code, 200, payload)
+        status = payload.get("status") or {}
+        self.assertEqual(status.get("model_type"), "voxcpm2")
+        self.assertEqual(status.get("model_type_label"), "VoxCPM2")
+        self.assertFalse(status.get("supports_generation"))
+
+    def test_model_voices_route_uses_model_specific_voice_metadata(self) -> None:
+        custom_entry = {
+            "id": "openbmb/VoxCPM2",
+            "display_name": "VoxCPM2",
+            "model_type": "voxcpm2",
+            "model_type_label": "VoxCPM2",
+            "voices": ["speaker_a", "speaker_b"],
+            "supports_generation": False,
+        }
+
+        with mock.patch.object(app_main, "get_model_catalog_entry", return_value=custom_entry):
+            response = self.client.get("/api/models/voices?model_id=openbmb/VoxCPM2&model_type=voxcpm2")
+
+        payload = response.get_json(silent=True) or {}
+        self.assertEqual(response.status_code, 200, payload)
+        status = payload.get("status") or {}
+        self.assertEqual(status.get("model_type"), "voxcpm2")
+        self.assertEqual(status.get("model_type_label"), "VoxCPM2")
+        self.assertEqual(status.get("voices"), ["speaker_a", "speaker_b"])
+        self.assertEqual(status.get("default_voice"), "speaker_a")
+        self.assertFalse(status.get("supports_generation"))
 
     def test_upload_rejects_missing_epub_field(self) -> None:
         response = self.client.post(
@@ -404,7 +438,25 @@ class ApiRoutesTests(unittest.TestCase):
 
     def test_generate_rejects_unsupported_vox_model_type(self) -> None:
         upload_payload = self._upload_placeholder_epub()
-        with mock.patch.object(app_main, "is_hf_model_cached", return_value=True):
+        catalog_entry = {
+            "model_id": "openbmb/VoxCPM2",
+            "model_type": "voxcpm2",
+            "model_type_label": "VoxCPM2",
+            "voices": ["speaker_a"],
+            "default_voice": "speaker_a",
+            "supports_generation": False,
+            "downloaded": True,
+            "status": "downloaded",
+            "progress": 100,
+            "download_required": True,
+            "predefined": False,
+        }
+
+        with mock.patch.object(app_main, "get_model_catalog_entry", return_value=catalog_entry), mock.patch.object(
+            app_main,
+            "is_hf_model_cached",
+            return_value=True,
+        ):
             response = self.client.post(
                 "/api/generate",
                 json={
@@ -412,9 +464,9 @@ class ApiRoutesTests(unittest.TestCase):
                     "output_dir": str(DEFAULT_OUTPUT_DIR),
                     "output_name": "other-unsupported",
                     "mode": "single",
-                    "voice": "default",
+                    "voice": "speaker_a",
                     "model_id": "openbmb/VoxCPM2",
-                    "model_type": "other",
+                    "model_type": "voxcpm2",
                 },
                 headers=self._headers(),
             )

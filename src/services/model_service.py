@@ -7,6 +7,47 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 
+def _normalize_voice_options(raw_voices: object) -> List[str]:
+    if raw_voices is None:
+        return []
+
+    if isinstance(raw_voices, str):
+        values = [raw_voices]
+    elif isinstance(raw_voices, (list, tuple, set)):
+        values = list(raw_voices)
+    else:
+        return []
+
+    normalized: List[str] = []
+    seen = set()
+    for value in values:
+        voice = str(value or "").strip()
+        if voice and voice not in seen:
+            normalized.append(voice)
+            seen.add(voice)
+    return normalized
+
+
+def _resolve_voice_profile(
+    voices: Optional[object],
+    default_voice: Optional[object],
+    fallback_voices: Optional[List[str]] = None,
+) -> Tuple[List[str], Optional[str]]:
+    resolved_voices = _normalize_voice_options(voices) if voices is not None else list(fallback_voices or [])
+    resolved_default = str(default_voice or "").strip() or None
+
+    if not resolved_voices and resolved_default:
+        resolved_voices = [resolved_default]
+
+    if resolved_voices:
+        if resolved_default not in resolved_voices:
+            resolved_default = resolved_voices[0]
+    else:
+        resolved_default = None
+
+    return resolved_voices, resolved_default
+
+
 def is_hf_model_cached(model_id: str, deps: Any) -> bool:
     if not model_id:
         return False
@@ -29,11 +70,23 @@ def build_model_catalog_entry(
     *,
     description: str,
     predefined: bool,
+    voices: Optional[object] = None,
+    default_voice: Optional[object] = None,
+    supports_generation: Optional[bool] = None,
 ) -> Dict:
     normalized_type = deps.normalize_model_type(model_type)
     downloaded = deps.is_hf_model_cached(model_id)
     status = "downloaded" if downloaded else "not_downloaded"
-    supports_generation = deps.supports_generation_for_model_type(normalized_type)
+    resolved_voices, resolved_default_voice = _resolve_voice_profile(
+        voices,
+        default_voice,
+        fallback_voices=deps.model_voices_for_type(normalized_type),
+    )
+    resolved_supports_generation = (
+        bool(supports_generation)
+        if supports_generation is not None
+        else deps.supports_generation_for_model_type(normalized_type)
+    )
     return {
         "id": model_id,
         "display_name": display_name,
@@ -47,12 +100,14 @@ def build_model_catalog_entry(
         "progress": 100 if downloaded else 0,
         "message": "Model is available locally." if downloaded else "Model is not downloaded yet.",
         "error": None,
-        "supports_generation": supports_generation,
-        "voices": deps.model_voices_for_type(normalized_type),
+        "supports_generation": resolved_supports_generation,
+        "voices": resolved_voices,
+        "default_voice": resolved_default_voice,
     }
 
 
 def local_default_model_entry(deps: Any) -> Dict:
+    voices = deps.model_voices_for_type("kokoro")
     return {
         "id": deps.LOCAL_DEFAULT_MODEL_ID,
         "display_name": "Built-in Kokoro (default)",
@@ -67,7 +122,8 @@ def local_default_model_entry(deps: Any) -> Dict:
         "message": "Built-in model is ready.",
         "error": None,
         "supports_generation": True,
-        "voices": deps.model_voices_for_type("kokoro"),
+        "voices": voices,
+        "default_voice": voices[0] if voices else None,
     }
 
 
@@ -82,11 +138,28 @@ def find_predefined_model(model_id: str, deps: Any) -> Optional[Dict]:
     return None
 
 
-def make_manual_model_entry(model_id: str, model_type: str, deps: Any) -> Dict:
+def make_manual_model_entry(
+    model_id: str,
+    model_type: str,
+    deps: Any,
+    *,
+    voices: Optional[object] = None,
+    default_voice: Optional[object] = None,
+    supports_generation: Optional[bool] = None,
+) -> Dict:
     normalized_type = deps.normalize_model_type(model_type)
     downloaded = deps.is_hf_model_cached(model_id)
     status = "downloaded" if downloaded else "not_downloaded"
-    supports_generation = deps.supports_generation_for_model_type(normalized_type)
+    resolved_voices, resolved_default_voice = _resolve_voice_profile(
+        voices,
+        default_voice,
+        fallback_voices=deps.model_voices_for_type(normalized_type),
+    )
+    resolved_supports_generation = (
+        bool(supports_generation)
+        if supports_generation is not None
+        else deps.supports_generation_for_model_type(normalized_type)
+    )
     return {
         "id": model_id,
         "display_name": f"Manual model ({model_id})",
@@ -100,8 +173,9 @@ def make_manual_model_entry(model_id: str, model_type: str, deps: Any) -> Dict:
         "progress": 100 if downloaded else 0,
         "message": "Model is available locally." if downloaded else "Model is not downloaded yet.",
         "error": None,
-        "supports_generation": supports_generation,
-        "voices": deps.model_voices_for_type(normalized_type),
+        "supports_generation": resolved_supports_generation,
+        "voices": resolved_voices,
+        "default_voice": resolved_default_voice,
     }
 
 
@@ -149,8 +223,18 @@ def merge_model_download_state(entry: Dict, deps: Any) -> Dict:
     normalized_type = deps.normalize_model_type(merged.get("model_type", "kokoro"))
     merged["model_type"] = normalized_type
     merged["model_type_label"] = deps.MODEL_TYPE_LABELS.get(normalized_type, deps.MODEL_TYPE_LABELS["other"])
-    merged["supports_generation"] = deps.supports_generation_for_model_type(normalized_type)
-    merged["voices"] = deps.model_voices_for_type(normalized_type)
+    if "supports_generation" in merged:
+        merged["supports_generation"] = bool(merged.get("supports_generation"))
+    else:
+        merged["supports_generation"] = deps.supports_generation_for_model_type(normalized_type)
+
+    voices_source = merged.get("voices") if "voices" in merged else None
+    default_voice_source = merged.get("default_voice") if "default_voice" in merged else None
+    merged["voices"], merged["default_voice"] = _resolve_voice_profile(
+        voices_source,
+        default_voice_source,
+        fallback_voices=None if voices_source is not None else deps.model_voices_for_type(normalized_type),
+    )
 
     if bool(merged.get("downloaded")):
         merged["progress"] = 100
@@ -176,6 +260,9 @@ def list_available_models(deps: Any) -> List[Dict]:
                 str(item["model_type"]),
                 description=str(item.get("description", "")),
                 predefined=True,
+                voices=item["voices"] if "voices" in item else None,
+                default_voice=item["default_voice"] if "default_voice" in item else None,
+                supports_generation=item["supports_generation"] if "supports_generation" in item else None,
             )
         )
 
@@ -202,6 +289,9 @@ def list_available_models(deps: Any) -> List[Dict]:
                 "message": str(entry.get("message") or manual_entry["message"]),
                 "error": entry.get("error"),
                 "downloaded": bool(entry.get("downloaded", manual_entry["downloaded"])),
+                "supports_generation": bool(entry["supports_generation"]) if "supports_generation" in entry else manual_entry["supports_generation"],
+                "voices": entry["voices"] if "voices" in entry else manual_entry["voices"],
+                "default_voice": entry["default_voice"] if "default_voice" in entry else manual_entry.get("default_voice"),
             }
         )
         models.append(manual_entry)
@@ -218,7 +308,7 @@ def get_model_catalog_entry(model_id: str, deps: Any, model_type: Optional[str] 
         if str(entry.get("id", "")).strip() == model_id:
             return dict(entry)
 
-    fallback_type = deps.normalize_model_type(model_type or "kokoro")
+    fallback_type = deps.infer_model_type_for_model(model_id, fallback=model_type or "kokoro")
     return deps.make_manual_model_entry(model_id, fallback_type)
 
 
@@ -403,6 +493,10 @@ def is_model_download_active(model_id: str, deps: Any) -> bool:
 
 
 def infer_model_type_for_model(model_id: str, deps: Any, fallback: str = "kokoro") -> str:
+    aliased_type = deps.normalize_model_type(model_id, default="")
+    if aliased_type:
+        return deps.normalize_model_type(aliased_type, default=fallback)
+
     predefined = deps.find_predefined_model(model_id)
     if predefined:
         return deps.normalize_model_type(predefined.get("model_type"), default=fallback)
@@ -415,6 +509,11 @@ def infer_model_type_for_model(model_id: str, deps: Any, fallback: str = "kokoro
 
 
 def run_model_download(model_id: str, model_type: str, deps: Any) -> None:
+    voice_status = deps.model_voice_status(model_id, model_type)
+    resolved_voices = list(voice_status.get("voices") or [])
+    resolved_default_voice = voice_status.get("default_voice")
+    resolved_supports_generation = bool(voice_status.get("supports_generation"))
+
     try:
         def report_progress(percent: int, message: str) -> None:
             deps.set_model_download_state(
@@ -434,8 +533,9 @@ def run_model_download(model_id: str, model_type: str, deps: Any) -> None:
                 downloaded=False,
                 message="Model download failed.",
                 error=download_err,
-                supports_generation=deps.supports_generation_for_model_type(model_type),
-                voices=deps.model_voices_for_type(model_type),
+                supports_generation=resolved_supports_generation,
+                voices=resolved_voices,
+                default_voice=resolved_default_voice,
             )
             return
 
@@ -447,8 +547,9 @@ def run_model_download(model_id: str, model_type: str, deps: Any) -> None:
             message="Model download complete.",
             error=None,
             cache_path=str(cache_path) if cache_path else None,
-            supports_generation=deps.supports_generation_for_model_type(model_type),
-            voices=deps.model_voices_for_type(model_type),
+            supports_generation=resolved_supports_generation,
+            voices=resolved_voices,
+            default_voice=resolved_default_voice,
         )
     except Exception as exc:
         deps.set_model_download_state(
@@ -458,8 +559,9 @@ def run_model_download(model_id: str, model_type: str, deps: Any) -> None:
             downloaded=False,
             message="Model download failed.",
             error=str(exc),
-            supports_generation=deps.supports_generation_for_model_type(model_type),
-            voices=deps.model_voices_for_type(model_type),
+            supports_generation=resolved_supports_generation,
+            voices=resolved_voices,
+            default_voice=resolved_default_voice,
         )
     finally:
         deps.unregister_model_download_worker(model_id)
@@ -470,19 +572,21 @@ def start_model_download(model_id: str, model_type: str, deps: Any) -> Tuple[Dic
     if model_id == deps.LOCAL_DEFAULT_MODEL_ID:
         return deps.local_default_model_entry(), False
 
-    predefined = deps.find_predefined_model(model_id)
-    if predefined:
-        display_name = str(predefined.get("display_name") or model_id)
-        description = str(predefined.get("description") or "")
-        normalized_type = deps.normalize_model_type(predefined.get("model_type"), default=normalized_type)
-        predefined_flag = True
-    else:
-        display_name = f"Manual model ({model_id})"
-        description = "User-specified Hugging Face model."
-        predefined_flag = False
+    base_entry = dict(deps.get_model_catalog_entry(model_id, normalized_type))
+    predefined_flag = bool(base_entry.get("predefined"))
+    display_name = str(base_entry.get("display_name") or (model_id if predefined_flag else f"Manual model ({model_id})"))
+    description = str(base_entry.get("description") or ("User-specified Hugging Face model." if not predefined_flag else ""))
+    normalized_type = deps.normalize_model_type(base_entry.get("model_type"), default=normalized_type)
+    voice_profile = {
+        "voices": base_entry.get("voices") if "voices" in base_entry else None,
+        "default_voice": base_entry.get("default_voice") if "default_voice" in base_entry else None,
+        "supports_generation": bool(base_entry.get("supports_generation"))
+        if "supports_generation" in base_entry
+        else deps.supports_generation_for_model_type(normalized_type),
+    }
 
     if deps.is_hf_model_cached(model_id):
-        cached_entry = deps.make_manual_model_entry(model_id, normalized_type)
+        cached_entry = dict(base_entry)
         cached_entry.update(
             {
                 "display_name": display_name,
@@ -493,8 +597,9 @@ def start_model_download(model_id: str, model_type: str, deps: Any) -> Tuple[Dic
                 "downloaded": True,
                 "message": "Model is available locally.",
                 "error": None,
-                "supports_generation": deps.supports_generation_for_model_type(normalized_type),
-                "voices": deps.model_voices_for_type(normalized_type),
+                "supports_generation": voice_profile["supports_generation"],
+                "voices": voice_profile["voices"],
+                "default_voice": voice_profile["default_voice"],
             }
         )
         deps.set_model_download_state(model_id, **cached_entry)
@@ -521,8 +626,9 @@ def start_model_download(model_id: str, model_type: str, deps: Any) -> Tuple[Dic
         progress=0,
         message=f"Preparing download for model '{model_id}'...",
         error=None,
-        supports_generation=deps.supports_generation_for_model_type(normalized_type),
-        voices=deps.model_voices_for_type(normalized_type),
+        supports_generation=voice_profile["supports_generation"],
+        voices=voice_profile["voices"],
+        default_voice=voice_profile["default_voice"],
     )
 
     worker = threading.Thread(target=deps.run_model_download, args=(model_id, normalized_type), daemon=True)
@@ -540,19 +646,33 @@ def model_download_status(model_id: str, deps: Any, model_type: Optional[str] = 
 def model_voice_status(model_id: Optional[str], model_type: Optional[str], deps: Any) -> Dict:
     target_model_id = str(model_id or "").strip() or None
     requested_type = deps.normalize_model_type(model_type, default="kokoro")
+    entry: Optional[Dict] = None
 
     if target_model_id:
         entry = deps.get_model_catalog_entry(target_model_id, requested_type)
-        if not model_type:
-            requested_type = deps.normalize_model_type(entry.get("model_type"), default=requested_type)
+        requested_type = deps.normalize_model_type(entry.get("model_type"), default=requested_type)
 
-    supports_generation = deps.supports_generation_for_model_type(requested_type)
-    voices = deps.model_voices_for_type(requested_type)
+    if entry is not None:
+        supports_generation = bool(entry.get("supports_generation")) if "supports_generation" in entry else deps.supports_generation_for_model_type(requested_type)
+        voices_source = entry.get("voices") if "voices" in entry else None
+        default_voice_source = entry.get("default_voice") if "default_voice" in entry else None
+        voices, default_voice = _resolve_voice_profile(
+            voices_source,
+            default_voice_source,
+            fallback_voices=None if voices_source is not None else deps.model_voices_for_type(requested_type),
+        )
+        model_type_label = str(entry.get("model_type_label") or deps.MODEL_TYPE_LABELS.get(requested_type, requested_type.replace("_", " ").title()))
+    else:
+        supports_generation = deps.supports_generation_for_model_type(requested_type)
+        voices, default_voice = _resolve_voice_profile(None, None, fallback_voices=deps.model_voices_for_type(requested_type))
+        model_type_label = deps.MODEL_TYPE_LABELS.get(requested_type, requested_type.replace("_", " ").title())
+
     return {
         "model_id": target_model_id,
         "model_type": requested_type,
-        "model_type_label": deps.MODEL_TYPE_LABELS.get(requested_type, deps.MODEL_TYPE_LABELS["other"]),
+        "model_type_label": model_type_label,
         "voices": voices,
+        "default_voice": default_voice,
         "supports_generation": supports_generation,
     }
 

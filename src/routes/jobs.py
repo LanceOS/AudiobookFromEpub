@@ -64,13 +64,19 @@ def register_job_routes(app, deps: Any) -> None:
 
         default_model_type = "kokoro" if model_id == deps.LOCAL_DEFAULT_MODEL_ID else deps.infer_model_type_for_model(model_id, fallback="kokoro")
         model_type = deps.normalize_model_type(data.get("model_type"), default=default_model_type)
+        voice_status = deps.model_voice_status(model_id, model_type)
+        model_type = str(voice_status.get("model_type") or model_type)
 
-        voice = str(data.get("voice", "af_heart")).strip() or "af_heart"
-        available_voices = deps.model_voices_for_type(model_type)
+        available_voices = list(voice_status.get("voices") or [])
+        default_voice = str(voice_status.get("default_voice") or "").strip()
+        if not available_voices:
+            return deps.jsonify({"error": "Selected model does not define any voices yet."}), 400
+
+        voice = str(data.get("voice", default_voice or available_voices[0])).strip() or default_voice or available_voices[0]
         if voice not in available_voices:
             return deps.jsonify({"error": f"Unsupported voice for model type '{model_type}'."}), 400
 
-        if not deps.supports_generation_for_model_type(model_type):
+        if not bool(voice_status.get("supports_generation")):
             return deps.jsonify(
                 {
                     "error": (

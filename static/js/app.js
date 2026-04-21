@@ -14,6 +14,7 @@ const state = {
   modelDownloadPollTimer: null,
   modelDownloadTargetId: null,
   modelDownloadInFlight: false,
+  initialVoiceOptions: [],
 };
 
 const TERMINAL_STATUSES = new Set(["completed", "failed", "stopped"]);
@@ -36,7 +37,10 @@ function selectedMode() {
 
 function normalizedModelType(rawValue) {
   const value = String(rawValue || "").trim().toLowerCase();
-  if (["kokoro", "other"].includes(value)) {
+  if (value === "vox") {
+    return "voxcpm2";
+  }
+  if (["kokoro", "voxcpm2", "other"].includes(value)) {
     return value;
   }
   return "kokoro";
@@ -44,6 +48,7 @@ function normalizedModelType(rawValue) {
 
 function modelTypeLabel(modelType) {
   const normalized = normalizedModelType(modelType);
+  if (normalized === "voxcpm2") return "VoxCPM2";
   if (normalized === "other") return "Other";
   return "Kokoro";
 }
@@ -83,6 +88,7 @@ function normalizeModelEntry(rawEntry) {
     error: (rawEntry && rawEntry.error) || null,
     supports_generation: supportsGeneration,
     voices,
+    default_voice: String((rawEntry && rawEntry.default_voice) || "").trim() || null,
   };
 }
 
@@ -100,6 +106,14 @@ function upsertModelEntry(entry) {
 
 function currentSelectedModel() {
   return state.models.find((model) => model.id === state.selectedModelId) || null;
+}
+
+function captureInitialVoiceOptions() {
+  const voiceSelect = byId("voiceSelect");
+  if (!voiceSelect) return [];
+  return Array.from(voiceSelect.options)
+    .map((option) => String(option.value || option.textContent || "").trim())
+    .filter(Boolean);
 }
 
 function setModelStatusMessage(message) {
@@ -163,6 +177,10 @@ function modelReadinessMessage(model) {
     return model.message || "Downloading selected model...";
   }
 
+  if (!Array.isArray(model.voices) || !model.voices.length) {
+    return "This model does not define any voices yet.";
+  }
+
   if (!model.downloaded) {
     return "Download this model before generation.";
   }
@@ -181,6 +199,7 @@ function modelReadinessMessage(model) {
 function modelBlocksGeneration() {
   const model = currentSelectedModel();
   if (!model) return true;
+  if (!Array.isArray(model.voices) || !model.voices.length) return true;
   if (!model.supports_generation) return true;
   if (model.download_required && !model.downloaded) return true;
   return false;
@@ -211,23 +230,27 @@ async function refreshModelCatalog(preserveSelection = true) {
   }
 }
 
-function renderVoiceOptions(voices) {
+function renderVoiceOptions(voices, preferredVoice = "") {
   const voiceSelect = byId("voiceSelect");
   if (!voiceSelect) return;
 
+  const voiceOptions = Array.isArray(voices)
+    ? voices.map((voice) => String(voice || "").trim()).filter(Boolean)
+    : [];
   const currentValue = voiceSelect.value;
+  const selectedPreferredVoice = String(preferredVoice || "").trim();
   voiceSelect.innerHTML = "";
 
-  if (!voices.length) {
+  if (!voiceOptions.length) {
     const placeholder = document.createElement("option");
     placeholder.value = "";
-    placeholder.textContent = "No voices available";
+    placeholder.textContent = "No voices defined for this model";
     voiceSelect.appendChild(placeholder);
     voiceSelect.disabled = true;
     return;
   }
 
-  voices.forEach((voice) => {
+  voiceOptions.forEach((voice) => {
     const option = document.createElement("option");
     option.value = voice;
     option.textContent = voice;
@@ -235,72 +258,82 @@ function renderVoiceOptions(voices) {
   });
 
   voiceSelect.disabled = false;
-  if (voices.includes(currentValue)) {
-    voiceSelect.value = currentValue;
+  let nextValue = "";
+  if (selectedPreferredVoice && voiceOptions.includes(selectedPreferredVoice)) {
+    nextValue = selectedPreferredVoice;
+  } else if (voiceOptions.includes(currentValue)) {
+    nextValue = currentValue;
+  } else {
+    nextValue = voiceOptions[0];
+  }
+
+  if (nextValue) {
+    voiceSelect.value = nextValue;
   }
 }
 
-async function refreshVoicesForSelection() {
+async function refreshVoicesForSelection(options = {}) {
   const model = currentSelectedModel();
   const modelTypeSelect = byId("modelTypeSelect");
   const voiceHint = byId("voiceHint");
   const voiceRefresh = byId("voiceRefreshHint");
-  const voiceSelect = byId("voiceSelect");
 
   if (!modelTypeSelect) return;
-  // Show a small visual cue while voices are being refreshed and disable the select
-  if (voiceRefresh) {
-    voiceRefresh.hidden = false;
-    voiceRefresh.textContent = "Refreshing voices…";
-  }
-  if (voiceSelect) {
-    voiceSelect.disabled = true;
-  }
   const requestedModelType = normalizedModelType(modelTypeSelect.value || (model && model.model_type) || "kokoro");
+
   const params = new URLSearchParams();
   if (model && model.id) {
     params.set("model_id", model.id);
   }
-  params.set("model_type", requestedModelType);
+  if (requestedModelType) {
+    params.set("model_type", requestedModelType);
+  }
+
+  let voices = [];
+  let defaultVoice = "";
 
   try {
     const response = await fetch(`/api/models/voices?${params.toString()}`);
     const payload = await response.json();
     if (!response.ok) {
-      throw new Error(payload.error || "Failed to load model voices");
+      throw new Error(payload.error || "Failed to load voices");
     }
 
-    const status = payload.status || {};
-    const voices = Array.isArray(status.voices) ? status.voices : [];
-    renderVoiceOptions(voices);
+    const voiceStatus = payload.status || {};
+    voices = Array.isArray(voiceStatus.voices)
+      ? voiceStatus.voices.map((voice) => String(voice || "").trim()).filter(Boolean)
+      : [];
+    defaultVoice = String(voiceStatus.default_voice || "").trim();
 
-    if (model) {
-      upsertModelEntry({
-        ...model,
-        model_type: normalizedModelType(status.model_type || requestedModelType),
-        voices,
-        supports_generation: Boolean(status.supports_generation),
-      });
-    }
-
-    if (voiceHint) {
-      if (status.supports_generation) {
-        voiceHint.textContent = "Voices are loaded from the selected model.";
-      } else {
-        voiceHint.textContent =
-          "Selected model type is download/select only right now. Generation currently supports Kokoro models.";
-      }
-    }
+    upsertModelEntry({
+      ...(model || {}),
+      ...voiceStatus,
+      model_type: String(voiceStatus.model_type || requestedModelType),
+      model_type_label: String(voiceStatus.model_type_label || modelTypeLabel(voiceStatus.model_type || requestedModelType)),
+    });
   } catch (error) {
-    renderVoiceOptions([]);
-    if (voiceHint) {
-      voiceHint.textContent = error.message || String(error);
+    const fallbackModel = currentSelectedModel();
+    voices = Array.isArray(fallbackModel && fallbackModel.voices) && fallbackModel.voices.length
+      ? fallbackModel.voices
+      : requestedModelType === "kokoro"
+        ? state.initialVoiceOptions
+        : [];
+    defaultVoice = String((fallbackModel && fallbackModel.default_voice) || "").trim();
+    console.warn("Failed to refresh voices:", error);
+  }
+
+  renderVoiceOptions(voices, options.preferDefaultVoice ? defaultVoice : "");
+
+  if (voiceHint) {
+    if (!voices.length) {
+      voiceHint.textContent = "This model does not define any voices yet.";
+    } else {
+      voiceHint.textContent = "Voices are loaded from the selected model.";
     }
-  } finally {
-    // hide the refresh cue; renderVoiceOptions will enable/disable the select as appropriate
-    if (voiceRefresh) {
-      voiceRefresh.hidden = true;
-    }
+  }
+
+  if (voiceRefresh) {
+    voiceRefresh.hidden = true;
   }
 }
 
@@ -326,7 +359,7 @@ async function syncModelControlsFromSelection() {
   setModelDownloadProgress(progressValue);
   setModelStatusMessage(modelReadinessMessage(model));
 
-  await refreshVoicesForSelection();
+  await refreshVoicesForSelection({ preferDefaultVoice: true });
   updateJobActions({ can_stop: false, can_clear_files: false, active: false, status: "idle" });
 }
 
@@ -356,6 +389,21 @@ async function refreshModelDownloadStatus(modelId) {
   if (MODEL_DOWNLOAD_TERMINAL_STATUSES.has(status.status)) {
     stopModelDownloadPolling();
     await refreshModelCatalog(true);
+    // Ensure a model that just finished downloading is present in the selector
+    // and selected so the UI updates deterministically.
+    try {
+      if (status && status.id) {
+        const found = state.models.some((m) => m.id === status.id);
+        if (found) {
+          state.selectedModelId = status.id;
+          renderModelOptions();
+          await syncModelControlsFromSelection();
+        }
+      }
+    } catch (err) {
+      console.warn("Failed to select downloaded model:", err);
+    }
+
     // After a model finishes downloading, refresh available voices so selections update.
     try {
       await refreshVoicesForSelection();
@@ -454,16 +502,29 @@ async function downloadModel() {
 
     setModelDownloadProgress(status.progress);
     setModelStatusMessage(modelReadinessMessage(status));
-    await refreshVoicesForSelection();
+    await refreshVoicesForSelection({ preferDefaultVoice: true });
 
     if (payload.started) {
       startModelDownloadPolling(state.selectedModelId);
     } else {
       stopModelDownloadPolling();
       await refreshModelCatalog(true);
+      // Ensure the immediate download result is reflected in the selector.
+      try {
+        if (status && status.id) {
+          const found = state.models.some((m) => m.id === status.id);
+          if (found) {
+            state.selectedModelId = status.id;
+            renderModelOptions();
+            await syncModelControlsFromSelection();
+          }
+        }
+      } catch (err) {
+        console.warn("Failed to select downloaded model after immediate completion:", err);
+      }
       // If the download completed immediately, also refresh voices so selection updates.
       try {
-        await refreshVoicesForSelection();
+        await refreshVoicesForSelection({ preferDefaultVoice: true });
       } catch (err) {
         console.warn("Failed to refresh voices after immediate model download:", err);
       }
@@ -939,15 +1000,21 @@ async function generateAudio() {
 
   const selectedModelId = (selectedModel && selectedModel.id) || state.defaultModelId || LOCAL_DEFAULT_MODEL_ID;
   const modelType = normalizedModelType(
-    (byId("modelTypeSelect") && byId("modelTypeSelect").value) || (selectedModel && selectedModel.model_type),
+    (selectedModel && selectedModel.model_type) || (byId("modelTypeSelect") && byId("modelTypeSelect").value),
   );
   const hfModelId = selectedModelId === LOCAL_DEFAULT_MODEL_ID ? "" : selectedModelId;
+  const voiceSelect = byId("voiceSelect");
+  const voice = String((voiceSelect && voiceSelect.value) || (selectedModel && selectedModel.default_voice) || "").trim();
+
+  if (!voice) {
+    throw new Error("Select a voice before generation.");
+  }
 
   const payload = {
     job_id: state.jobId,
     output_name: byId("outputName").value,
     output_dir: byId("outputDir").value,
-    voice: byId("voiceSelect").value,
+    voice,
     hf_model_id: hfModelId,
     model_id: selectedModelId,
     model_type: modelType,
@@ -1065,7 +1132,7 @@ function bindEvents() {
         });
       }
 
-      await refreshVoicesForSelection();
+      await refreshVoicesForSelection({ preferDefaultVoice: true });
       setModelStatusMessage(modelReadinessMessage(currentSelectedModel()));
       updateJobActions({ can_stop: false, can_clear_files: false, active: false, status: "idle" });
     });
@@ -1118,6 +1185,7 @@ function bindEvents() {
 
 async function initializeApp() {
   bindEvents();
+  state.initialVoiceOptions = captureInitialVoiceOptions();
   await refreshModelCatalog(false);
   renderFiles([]);
 }

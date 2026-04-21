@@ -7,6 +7,7 @@ const DEFAULT_BASE_URL = process.env.E2E_BASE_URL || process.env.BASE_URL || BAS
 const FIXTURE_EPUB = path.join(__dirname, 'fixture.epub');
 const OUTPUT_DIR = path.resolve(__dirname, '..', '..', 'generated_audio');
 const DEFAULT_MODEL_ID = 'hexgrad/Kokoro-82M';
+const OTHER_MODEL_ID = 'openbmb/VoxCPM2';
 const MOCK_JOB_ID = 'mock-job-123';
 const DEFAULT_VOICES = ['af_heart', 'af_bella', 'af_nicole'];
 const VOX_VOICES = ['vox_alpha', 'vox_beta'];
@@ -37,12 +38,26 @@ function mockModelCatalog() {
         supports_generation: true,
         voices: DEFAULT_VOICES,
       },
+      {
+        id: OTHER_MODEL_ID,
+        display_name: 'Vox CPM 2',
+        description: 'Alternative model repository.',
+        model_type: 'voxcpm2',
+        model_type_label: 'VoxCPM2',
+        predefined: true,
+        download_required: true,
+        downloaded: true,
+        progress: 100,
+        status: 'downloaded',
+        supports_generation: false,
+        voices: VOX_VOICES,
+      },
     ],
   };
 }
 
 function mockVoiceStatus(modelType) {
-  const normalizedType = modelType === 'vox' ? 'vox' : modelType === 'other' ? 'other' : 'kokoro';
+  const normalizedType = modelType === 'voxcpm2' || modelType === 'vox' ? 'voxcpm2' : modelType === 'other' ? 'other' : 'kokoro';
   const supportsGeneration = normalizedType === 'kokoro';
 
   return {
@@ -51,7 +66,7 @@ function mockVoiceStatus(modelType) {
       display_name: 'Kokoro 82M (Hugging Face)',
       description: 'Official Kokoro model repository.',
       model_type: normalizedType,
-      model_type_label: normalizedType === 'vox' ? 'Vox' : normalizedType === 'other' ? 'Other' : 'Kokoro',
+      model_type_label: normalizedType === 'voxcpm2' ? 'VoxCPM2' : normalizedType === 'other' ? 'Other' : 'Kokoro',
       predefined: true,
       download_required: false,
       downloaded: true,
@@ -264,9 +279,72 @@ test.describe('EPUB to Audiobook UI', () => {
     const generateButton = page.locator('#generateButton');
     await expect(generateButton).toBeEnabled();
 
-    await page.selectOption('#modelTypeSelect', 'other');
-    await expect(page.locator('#voiceHint')).toContainText('download/select only');
+    await page.selectOption('#modelSelect', OTHER_MODEL_ID);
+    await expect(page.locator('#modelTypeSelect')).toHaveValue('voxcpm2');
+    await expect(page.locator('#voiceSelect option')).toHaveText(VOX_VOICES);
     await expect(generateButton).toBeDisabled();
     await expect(page.locator('#generateDisabledReason')).toContainText('download/select only');
+  });
+
+  test('default voices are preloaded and refresh after model changes', async ({ page }) => {
+    let voiceRequestCount = 0;
+
+    await page.route(/\/api\/models(?:\?.*)?$/, async (route) => {
+      await route.fulfill(
+        jsonResponse({
+          default_model_id: DEFAULT_MODEL_ID,
+          models: [
+            {
+              id: DEFAULT_MODEL_ID,
+              display_name: 'Kokoro 82M (Hugging Face)',
+              description: 'Official Kokoro model repository.',
+              model_type: 'kokoro',
+              model_type_label: 'Kokoro',
+              predefined: true,
+              download_required: false,
+              downloaded: true,
+              progress: 100,
+              status: 'ready',
+              supports_generation: true,
+              voices: DEFAULT_VOICES,
+            },
+            {
+              id: OTHER_MODEL_ID,
+              display_name: 'Vox CPM 2',
+              description: 'Alternative model repository.',
+              model_type: 'voxcpm2',
+              model_type_label: 'VoxCPM2',
+              predefined: true,
+              download_required: true,
+              downloaded: false,
+              progress: 0,
+              status: 'not_downloaded',
+              supports_generation: false,
+              voices: VOX_VOICES,
+            },
+          ],
+        }),
+      );
+    });
+
+    await page.route(/\/api\/models\/voices(?:\?.*)?$/, async (route) => {
+      voiceRequestCount += 1;
+      const url = new URL(route.request().url());
+      const modelType = url.searchParams.get('model_type') || 'kokoro';
+      await route.fulfill(jsonResponse(mockVoiceStatus(modelType)));
+    });
+
+    await page.goto(DEFAULT_BASE_URL);
+    await expect(page.locator('#modelSelect option')).toHaveCount(2);
+    await expect(page.locator('#voiceSelect option')).toHaveText(DEFAULT_VOICES);
+    await expect(page.locator('#voiceRefreshHint')).toBeHidden();
+    await expect.poll(() => voiceRequestCount).toBe(1);
+
+    await page.selectOption('#modelSelect', OTHER_MODEL_ID);
+
+    await expect(page.locator('#modelTypeSelect')).toHaveValue('voxcpm2');
+    await expect(page.locator('#voiceSelect option')).toHaveText(VOX_VOICES);
+    await expect(page.locator('#voiceRefreshHint')).toBeHidden();
+    await expect.poll(() => voiceRequestCount).toBe(2);
   });
 });

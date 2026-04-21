@@ -40,17 +40,46 @@ def main() -> None:
         assert upload_resp.status_code == 200, upload_resp.json
         job_id = upload_resp.json["job_id"]
 
-        generate_resp = client.post(
-            "/api/generate",
-            json={
-                "job_id": job_id,
-                "output_dir": output_dir,
-                "output_name": "smoke_output",
-                "mode": "single",
-                "voice": "af_heart",
-            },
-            headers=headers,
-        )
+        # Query available models and voices so the smoke test works in environments
+        # where local Kokoro voices may be absent. Pick the first model that
+        # supports generation and exposes at least one voice.
+        models_resp = client.get("/api/models")
+        assert models_resp.status_code == 200, models_resp.json
+        models_payload = models_resp.json or {}
+        models = list(models_payload.get("models") or [])
+
+        chosen_model_id = None
+        chosen_voice = None
+        for m in models:
+            voices = list(m.get("voices") or [])
+            if voices and bool(m.get("supports_generation")):
+                chosen_model_id = m.get("id")
+                chosen_voice = voices[0]
+                break
+
+        # Fallback: query model voices for the default model id
+        if not chosen_voice:
+            voices_resp = client.get("/api/models/voices", query_string={"model_id": models_payload.get("default_model_id")})
+            if voices_resp.status_code == 200:
+                status = voices_resp.json.get("status") or {}
+                vlist = list(status.get("voices") or [])
+                if vlist:
+                    chosen_model_id = models_payload.get("default_model_id")
+                    chosen_voice = vlist[0]
+
+        assert chosen_voice, f"No available voices to test (models={models_payload})"
+
+        gen_payload = {
+            "job_id": job_id,
+            "output_dir": output_dir,
+            "output_name": "smoke_output",
+            "mode": "single",
+            "voice": chosen_voice,
+        }
+        if chosen_model_id:
+            gen_payload["model_id"] = chosen_model_id
+
+        generate_resp = client.post("/api/generate", json=gen_payload, headers=headers)
         assert generate_resp.status_code == 200, generate_resp.json
 
         final_status = None

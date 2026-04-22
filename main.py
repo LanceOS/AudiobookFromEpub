@@ -20,6 +20,7 @@ import subprocess
 import threading
 import time
 import sys
+import signal
 from datetime import datetime, timezone
 from pathlib import Path
 from pathlib import Path as _Path
@@ -96,27 +97,55 @@ except Exception as exc:  # pragma: no cover - helpful user-facing error
     sys.stderr.write("Then re-run: python main.py\n")
     raise
 
-try:
-    from kokoro import KPipeline  # type: ignore[reportMissingImports]
-    from kokoro.model import KModel  # type: ignore[reportMissingImports]
+# Heavy ML imports (kokoro / qwen_tts) are lazily loaded to avoid
+# initializing CUDA/drivers at module import time. Call `lazy_load_heavy_deps()`
+# from the functions that actually need these libraries.
+KPipeline = None
+KModel = None
+HAS_KOKORO = False
+KOKORO_IMPORT_ERROR = ""
 
-    HAS_KOKORO = True
-    KOKORO_IMPORT_ERROR = ""
-except Exception as exc:
-    KPipeline = None
-    KModel = None
-    HAS_KOKORO = False
-    KOKORO_IMPORT_ERROR = str(exc)
+Qwen3TTSModel = None
+HAS_QWEN_TTS = False
+QWEN_TTS_IMPORT_ERROR = ""
 
-try:
-    from qwen_tts import Qwen3TTSModel  # type: ignore[reportMissingImports]
+_HEAVY_DEPS_LOADED = False
 
-    HAS_QWEN_TTS = True
-    QWEN_TTS_IMPORT_ERROR = ""
-except Exception as exc:
-    Qwen3TTSModel = None
-    HAS_QWEN_TTS = False
-    QWEN_TTS_IMPORT_ERROR = str(exc)
+def lazy_load_heavy_deps() -> None:
+    """Attempt to import heavy ML libraries (kokoro, qwen_tts) once.
+
+    This prevents GPU/driver initialization at process start and confines
+    potentially unsafe native initialization to on-demand code paths.
+    """
+    global _HEAVY_DEPS_LOADED, KPipeline, KModel, HAS_KOKORO, KOKORO_IMPORT_ERROR
+    global Qwen3TTSModel, HAS_QWEN_TTS, QWEN_TTS_IMPORT_ERROR
+
+    if _HEAVY_DEPS_LOADED:
+        return
+    _HEAVY_DEPS_LOADED = True
+
+    try:
+        from kokoro import KPipeline as _KPipeline  # type: ignore[reportMissingImports]
+        from kokoro.model import KModel as _KModel  # type: ignore[reportMissingImports]
+        KPipeline = _KPipeline
+        KModel = _KModel
+        HAS_KOKORO = True
+        KOKORO_IMPORT_ERROR = ""
+    except Exception as exc:
+        KPipeline = None
+        KModel = None
+        HAS_KOKORO = False
+        KOKORO_IMPORT_ERROR = str(exc)
+
+    try:
+        from qwen_tts import Qwen3TTSModel as _Qwen3TTSModel  # type: ignore[reportMissingImports]
+        Qwen3TTSModel = _Qwen3TTSModel
+        HAS_QWEN_TTS = True
+        QWEN_TTS_IMPORT_ERROR = ""
+    except Exception as exc:
+        Qwen3TTSModel = None
+        HAS_QWEN_TTS = False
+        QWEN_TTS_IMPORT_ERROR = str(exc)
 
 JOBS: Dict[str, Dict] = {}
 JOBS_LOCK = threading.Lock()
@@ -137,6 +166,7 @@ MODEL_DOWNLOADS: Dict[str, Dict] = {}
 MODEL_DOWNLOADS_LOCK = threading.Lock()
 MODEL_DOWNLOAD_WORKERS: Dict[str, threading.Thread] = {}
 MODEL_DOWNLOAD_WORKERS_LOCK = threading.Lock()
+STOP_EVENT = threading.Event()
 
 
 JobStopped = job_feature.JobStopped
@@ -593,6 +623,8 @@ def choose_voice_reference(voice: str) -> str:
 
 
 def ensure_generation_backend_ready(model_type: str) -> Optional[str]:
+    # Ensure heavy ML libraries are available lazily before checking availability
+    lazy_load_heavy_deps()
     resolved_type = normalize_model_type(model_type, default="other")
 
     if resolved_type == "kokoro" and not HAS_KOKORO:
@@ -613,6 +645,9 @@ def ensure_generation_backend_ready(model_type: str) -> Optional[str]:
 
 
 def _synthesis_feature_deps() -> SimpleNamespace:
+    # Ensure heavy ML libraries are loaded lazily when synthesis deps are requested
+    lazy_load_heavy_deps()
+
     return SimpleNamespace(
         BASE_DIR=BASE_DIR,
         HAS_KOKORO=HAS_KOKORO,
@@ -843,6 +878,79 @@ register_ui_routes(app, ROUTE_DEPS)
 register_upload_routes(app, ROUTE_DEPS)
 register_model_routes(app, ROUTE_DEPS)
 register_job_routes(app, ROUTE_DEPS)
+
+
+def graceful_shutdown(signum, frame) -> None:
+    """Signal handler to attempt a graceful shutdown of background workers.
+
+    This does best-effort joining of worker threads and attempts to free CUDA
+    memory if PyTorch is available. It then exits the process.
+    """
+    try:
+        print("Signal received: shutting down gracefully...")
+    except Exception:
+        pass
+
+    STOP_EVENT.set()
+
+    # Join any registered workers
+    try:
+        with WORKERS_LOCK:
+            workers = list(WORKERS.values())
+    except Exception:
+        workers = []
+
+    for w in workers:
+        try:
+            if w is not None and getattr(w, "is_alive", lambda: False)():
+                w.join(timeout=5)
+        except Exception:
+            pass
+
+    # Join model download workers
+    try:
+        with MODEL_DOWNLOAD_WORKERS_LOCK:
+            mdws = list(MODEL_DOWNLOAD_WORKERS.values())
+    except Exception:
+        mdws = []
+
+    for w in mdws:
+        try:
+            if w is not None and getattr(w, "is_alive", lambda: False)():
+                w.join(timeout=5)
+        except Exception:
+            pass
+
+    # Best-effort: free CUDA resources if available
+    try:
+        import torch as _torch  # type: ignore[reportMissingImports]
+
+        if getattr(_torch, "cuda", None) and _torch.cuda.is_available():
+            try:
+                _torch.cuda.synchronize()
+            except Exception:
+                pass
+            try:
+                _torch.cuda.empty_cache()
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+    # Short pause for cleanup then exit
+    try:
+        time.sleep(0.1)
+    except Exception:
+        pass
+
+    try:
+        sys.exit(0)
+    except SystemExit:
+        os._exit(0)
+
+
+signal.signal(signal.SIGINT, graceful_shutdown)
+signal.signal(signal.SIGTERM, graceful_shutdown)
 
 
 def parse_args() -> argparse.Namespace:

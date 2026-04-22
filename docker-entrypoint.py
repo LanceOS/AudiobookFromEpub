@@ -1,6 +1,58 @@
 #!/usr/bin/env python3
 import os
 import sys
+
+def recursive_chown(path: str, uid: int, gid: int) -> None:
+    try:
+        if os.path.exists(path):
+            for root, dirs, files in os.walk(path, topdown=False):
+                for name in files:
+                    try:
+                        os.chown(os.path.join(root, name), uid, gid)
+                    except Exception:
+                        pass
+                for name in dirs:
+                    try:
+                        os.chown(os.path.join(root, name), uid, gid)
+                    except Exception:
+                        pass
+            try:
+                os.chown(path, uid, gid)
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+
+def drop_privileges(uid: int = 10001, gid: int = 10001) -> None:
+    try:
+        # Set group then user
+        os.setgid(gid)
+        os.setuid(uid)
+    except Exception:
+        pass
+
+
+def main() -> None:
+    # Ensure mounted volumes are writable by the unprivileged app user
+    for p in ("/app/generated_audio", "/app/.app_data"):
+        recursive_chown(p, 10001, 10001)
+
+    # Drop privileges and exec the CMD
+    drop_privileges(10001, 10001)
+
+    if len(sys.argv) > 1:
+        os.execvp(sys.argv[1], sys.argv[1:])
+    else:
+        # Fallback: run default app
+        os.execvp("python", ["python", "main.py", "--host", "0.0.0.0", "--port", "5000"]) 
+
+
+if __name__ == "__main__":
+    main()
+#!/usr/bin/env python3
+import os
+import sys
 import pwd
 
 

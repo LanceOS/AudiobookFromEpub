@@ -38,7 +38,34 @@ def main() -> None:
     for p in ("/app/generated_audio", "/app/.app_data"):
         recursive_chown(p, 10001, 10001)
 
-    # Drop privileges and exec the CMD
+    # Ensure app user's home and Hugging Face cache directories exist and
+    # are writable by the unprivileged `appuser` (UID/GID 10001). Some HF
+    # libraries write tokens to "$HOME/.cache/huggingface/token"; if HOME
+    # points to /root the unprivileged user cannot write there.
+    app_home = "/home/appuser"
+    try:
+        os.makedirs(app_home, exist_ok=True)
+    except Exception:
+        pass
+
+    cache_dir = os.path.join(app_home, ".cache")
+    hf_cache = os.path.join(cache_dir, "huggingface")
+    try:
+        os.makedirs(hf_cache, exist_ok=True)
+    except Exception:
+        pass
+
+    # Expose HOME/XDG cache env so libraries use the app user's cache location
+    os.environ["HOME"] = app_home
+    os.environ["XDG_CACHE_HOME"] = cache_dir
+    os.environ.setdefault("HF_HOME", hf_cache)
+
+    # Make sure the cache/home dirs are owned by appuser before dropping
+    recursive_chown(app_home, 10001, 10001)
+    recursive_chown(cache_dir, 10001, 10001)
+    recursive_chown(hf_cache, 10001, 10001)
+
+    # Drop privileges and exec the CMD as `appuser`.
     drop_privileges(10001, 10001)
 
     if len(sys.argv) > 1:

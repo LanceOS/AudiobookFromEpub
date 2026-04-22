@@ -27,17 +27,6 @@ def register_job_routes(app, deps: Any) -> None:
         if mode not in {"single", "chapter"}:
             return deps.jsonify({"error": "mode must be 'single' or 'chapter'."}), 400
 
-        if not deps.is_test_mode() and not deps.HAS_KOKORO:
-            return deps.jsonify(
-                {
-                    "error": (
-                        "Kokoro is unavailable in this Python environment "
-                        f"({deps.KOKORO_IMPORT_ERROR}). Activate kokoro_venv (Python 3.12) "
-                        "and install requirements, or run in test mode with AUDIOBOOK_TEST_MODE=1."
-                    )
-                }
-            ), 400
-
         output_dir, output_err = deps.validate_output_directory(str(data.get("output_dir", "")))
         if output_err:
             return deps.jsonify({"error": output_err}), 400
@@ -62,7 +51,7 @@ def register_job_routes(app, deps: Any) -> None:
         else:
             model_id = deps.LOCAL_DEFAULT_MODEL_ID
 
-        default_model_type = "kokoro" if model_id == deps.LOCAL_DEFAULT_MODEL_ID else deps.infer_model_type_for_model(model_id, fallback="kokoro")
+        default_model_type = "kokoro" if model_id == deps.LOCAL_DEFAULT_MODEL_ID else deps.infer_model_type_for_model(model_id, fallback="other")
         model_type = deps.normalize_model_type(data.get("model_type"), default=default_model_type)
         voice_status = deps.model_voice_status(model_id, model_type)
         model_type = str(voice_status.get("model_type") or model_type)
@@ -81,10 +70,15 @@ def register_job_routes(app, deps: Any) -> None:
                 {
                     "error": (
                         f"Model type '{model_type}' is currently download/select only. "
-                        "Generation is supported for Kokoro models."
+                        "Generation is not enabled for this model type."
                     )
                 }
             ), 400
+
+        if not deps.is_test_mode():
+            backend_err = deps.ensure_generation_backend_ready(model_type)
+            if backend_err:
+                return deps.jsonify({"error": backend_err}), 400
 
         if model_id != deps.LOCAL_DEFAULT_MODEL_ID:
             selected_model_status = deps.model_download_status(model_id, model_type)
@@ -222,7 +216,6 @@ def register_job_routes(app, deps: Any) -> None:
             return deps.jsonify({"error": "Job not found."}), 404
 
         files = deps.list_generated_files(job)
-        deps.update_job(job_id, generated_files=[f["name"] for f in files])
 
         refreshed = deps.get_job(job_id)
         return deps.jsonify(

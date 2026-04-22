@@ -52,21 +52,22 @@
             <div>
               <label class="field-label" for="modelSelect">Model</label>
               <select id="modelSelect" aria-describedby="modelHint"></select>
-              <div id="modelHint" class="field-hint">Kokoro is the default. Download your selected model before generation.</div>
+              <div id="modelHint" class="field-hint">Choose a model from the catalog. Download non-default models before generation.</div>
             </div>
             <div>
               <label class="field-label" for="modelTypeSelect">Model Type</label>
               <select id="modelTypeSelect" aria-describedby="modelTypeHint">
-                <option value="kokoro">Kokoro</option>
+                <option value="kokoro" selected>Kokoro</option>
+                <option value="vox" hidden>Vox</option>
                 <option value="voxcpm2">VoxCPM2</option>
                 <option value="other">Other</option>
               </select>
-              <div id="modelTypeHint" class="field-hint">The selected model controls which voices are available.</div>
+              <div id="modelTypeHint" class="field-hint">Choose a type first, then pick a voice from that model.</div>
             </div>
             <div class="form-full">
               <label class="field-label" for="hfModelId">Manual Hugging Face Model ID (optional)</label>
               <input id="hfModelId" type="text" placeholder="organization/model" />
-              <div class="field-hint">Leave blank to download the model selected above. Manual entries are cached in <code>.app_data/hf_models</code>.</div>
+              <div class="field-hint">Leave blank to download the selected model. Manual entries are cached in <code>.app_data/hf_models</code>.</div>
             </div>
             <div class="form-full model-download-row">
               <button id="downloadModelButton" class="btn-secondary" type="button">Download Model</button>
@@ -78,9 +79,7 @@
             <div>
               <label class="field-label" for="voiceSelect">Voice</label>
               <select id="voiceSelect" aria-describedby="voiceHint">
-                {% for voice in voices %}
-                <option value="{{ voice }}">{{ voice }}</option>
-                {% endfor %}
+                <option value="">Select a model to load voices</option>
               </select>
               <div id="voiceHint" class="field-hint">Voices are loaded from the selected model.</div>
               <div id="voiceRefreshHint" class="field-hint voice-refresh" aria-live="polite" hidden>Refreshing voices…</div>

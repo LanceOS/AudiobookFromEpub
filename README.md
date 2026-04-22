@@ -1,6 +1,6 @@
 # AudiobookFromEpub
 
-Localhost web app that converts an EPUB into audiobook WAV output using Kokoro TTS.
+Localhost web app that converts an EPUB into audiobook WAV output using local TTS backends (Kokoro and Qwen3 CustomVoice).
 
 ## Features
 
@@ -10,10 +10,11 @@ Localhost web app that converts an EPUB into audiobook WAV output using Kokoro T
 - Choose output directory (validated server-side).
 - Built-in model manager with predefined downloadable models:
   - `hexgrad/Kokoro-82M`
-  - `openbmb/VoxCPM2` (no longer listed by default in the UI catalog; still usable as a manual HF model)
+  - `Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice`
 - Download models before generation and track download progress in the UI.
 - Manual Hugging Face model ID entry is supported alongside predefined model choices.
-- Select a model type (`Kokoro`, `VoxCPM2`, `Other`) and then select a voice from the selected model's voice list.
+- Model type is inferred from the selected model ID and model metadata.
+- Voices are loaded dynamically from the selected model's voice metadata.
 - Generate either:
   - one large audio file, or
   - one audio file per chapter.
@@ -53,8 +54,8 @@ Open:
 ## UI Workflow
 
 1. Drop or choose an EPUB file.
-2. In **Settings**, choose a model from the catalog (Kokoro is default), or enter a manual Hugging Face model ID.
-3. Select model type, then click **Download Model** for any non-default model.
+2. In **Settings**, choose a model from the catalog (local Kokoro is default), or enter a manual Hugging Face model ID.
+3. Click **Download Model** for any non-default model.
 4. Wait for download status to show the model is ready.
 5. Confirm detected title and optionally edit filename.
 6. Set output directory.
@@ -68,6 +69,7 @@ Open:
 ## Model Support Notes
 
 - `Kokoro` models are supported for generation.
+- `Qwen3 CustomVoice` models are supported for generation when `qwen-tts` is installed.
 - `VoxCPM2` and `Other` model types are currently supported for download and selection only unless a model entry explicitly marks itself as generation-capable.
 - If a model defines its own voice list, the app uses that list and falls back to the first voice when no default is supplied.
 - If a model defines no voices, generation is blocked until voices are provided.

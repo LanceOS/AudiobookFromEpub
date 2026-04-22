@@ -11,4 +11,5 @@ sentencepiece>=0.2,<1
 scipy>=1.13,<2
 # Kokoro requires Python <3.13 (install in a separate Python 3.12 venv)
 kokoro>=0.9.2; python_version < "3.13"
+qwen-tts>=0.1
 flask>=3.1,<4

@@ -220,7 +220,7 @@ def merge_model_download_state(entry: Dict, deps: Any) -> Dict:
         if key in runtime:
             merged[key] = runtime[key]
 
-    normalized_type = deps.normalize_model_type(merged.get("model_type", "kokoro"))
+    normalized_type = deps.normalize_model_type(merged.get("model_type", "other"))
     merged["model_type"] = normalized_type
     merged["model_type_label"] = deps.MODEL_TYPE_LABELS.get(normalized_type, deps.MODEL_TYPE_LABELS["other"])
     if "supports_generation" in merged:
@@ -278,7 +278,7 @@ def list_available_models(deps: Any) -> List[Dict]:
         if not model_id:
             continue
 
-        model_type = deps.normalize_model_type(entry.get("model_type", "kokoro"))
+        model_type = deps.normalize_model_type(entry.get("model_type", "other"), default="other")
         manual_entry = deps.make_manual_model_entry(model_id, model_type)
         manual_entry.update(
             {
@@ -308,7 +308,7 @@ def get_model_catalog_entry(model_id: str, deps: Any, model_type: Optional[str] 
         if str(entry.get("id", "")).strip() == model_id:
             return dict(entry)
 
-    fallback_type = deps.infer_model_type_for_model(model_id, fallback=model_type or "kokoro")
+    fallback_type = deps.infer_model_type_for_model(model_id, fallback=model_type or "other")
     return deps.make_manual_model_entry(model_id, fallback_type)
 
 
@@ -492,7 +492,7 @@ def is_model_download_active(model_id: str, deps: Any) -> bool:
         return False
 
 
-def infer_model_type_for_model(model_id: str, deps: Any, fallback: str = "kokoro") -> str:
+def infer_model_type_for_model(model_id: str, deps: Any, fallback: str = "other") -> str:
     aliased_type = deps.normalize_model_type(model_id, default="")
     if aliased_type:
         return deps.normalize_model_type(aliased_type, default=fallback)
@@ -510,9 +510,19 @@ def infer_model_type_for_model(model_id: str, deps: Any, fallback: str = "kokoro
 
 def run_model_download(model_id: str, model_type: str, deps: Any) -> None:
     voice_status = deps.model_voice_status(model_id, model_type)
+    resolved_model_type = deps.normalize_model_type(voice_status.get("model_type"), default=model_type)
     resolved_voices = list(voice_status.get("voices") or [])
     resolved_default_voice = voice_status.get("default_voice")
     resolved_supports_generation = bool(voice_status.get("supports_generation"))
+
+    if resolved_model_type == "qwen3_customvoice" and callable(getattr(deps, "discover_qwen_supported_speakers", None)):
+        discovered_voices, discovered_default_voice = deps.discover_qwen_supported_speakers(
+            model_id,
+            allow_download=False,
+        )
+        if discovered_voices:
+            resolved_voices = discovered_voices
+            resolved_default_voice = discovered_default_voice or discovered_voices[0]
 
     try:
         def report_progress(percent: int, message: str) -> None:
@@ -645,7 +655,7 @@ def model_download_status(model_id: str, deps: Any, model_type: Optional[str] = 
 
 def model_voice_status(model_id: Optional[str], model_type: Optional[str], deps: Any) -> Dict:
     target_model_id = str(model_id or "").strip() or None
-    requested_type = deps.normalize_model_type(model_type, default="kokoro")
+    requested_type = deps.normalize_model_type(model_type, default="other")
     entry: Optional[Dict] = None
 
     if target_model_id:
@@ -661,6 +671,16 @@ def model_voice_status(model_id: Optional[str], model_type: Optional[str], deps:
             default_voice_source,
             fallback_voices=None if voices_source is not None else deps.model_voices_for_type(requested_type),
         )
+
+        if requested_type == "qwen3_customvoice" and target_model_id and callable(getattr(deps, "discover_qwen_supported_speakers", None)):
+            discovered_voices, discovered_default_voice = deps.discover_qwen_supported_speakers(
+                target_model_id,
+                allow_download=False,
+            )
+            if discovered_voices:
+                voices = discovered_voices
+                default_voice = discovered_default_voice or discovered_voices[0]
+
         model_type_label = str(entry.get("model_type_label") or deps.MODEL_TYPE_LABELS.get(requested_type, requested_type.replace("_", " ").title()))
     else:
         supports_generation = deps.supports_generation_for_model_type(requested_type)

@@ -53,6 +53,11 @@ function modelTypeLabel(modelType) {
   return "Kokoro";
 }
 
+function supportsGenerationForModelType(modelType) {
+  const normalized = normalizedModelType(modelType);
+  return normalized === "kokoro" || normalized === "qwen3_customvoice";
+}
+
 function isActiveJobStatus(status) {
   return ACTIVE_JOB_STATUSES.has(String(status || "").trim().toLowerCase());
 }
@@ -108,6 +113,12 @@ function currentSelectedModel() {
   return state.models.find((model) => model.id === state.selectedModelId) || null;
 }
 
+function currentSelectedModelType() {
+  const model = currentSelectedModel();
+  const modelTypeSelect = byId("modelTypeSelect");
+  return normalizedModelType((modelTypeSelect && modelTypeSelect.value) || (model && model.model_type) || "kokoro");
+}
+
 function setModelStatusMessage(message) {
   const statusEl = byId("modelStatusMessage");
   if (!statusEl) return;
@@ -161,6 +172,11 @@ function modelReadinessMessage(model) {
     return "Select a model before generation.";
   }
 
+  const selectedModelType = currentSelectedModelType();
+  if (!supportsGenerationForModelType(selectedModelType)) {
+    return "This model type is download/select only right now.";
+  }
+
   if (model.id === LOCAL_DEFAULT_MODEL_ID) {
     return "Built-in Kokoro is ready.";
   }
@@ -191,8 +207,9 @@ function modelReadinessMessage(model) {
 function modelBlocksGeneration() {
   const model = currentSelectedModel();
   if (!model) return true;
+  const selectedModelType = currentSelectedModelType();
+  if (!supportsGenerationForModelType(selectedModelType)) return true;
   if (!Array.isArray(model.voices) || !model.voices.length) return true;
-  if (!model.supports_generation) return true;
   if (model.download_required && !model.downloaded) return true;
   return false;
 }
@@ -267,6 +284,7 @@ function renderVoiceOptions(voices, preferredVoice = "") {
 async function refreshVoicesForSelection(options = {}) {
   const model = currentSelectedModel();
   const hfModelId = byId("hfModelId");
+  const modelTypeSelect = byId("modelTypeSelect");
   const voiceHint = byId("voiceHint");
   const voiceRefresh = byId("voiceRefreshHint");
 
@@ -277,10 +295,14 @@ async function refreshVoicesForSelection(options = {}) {
 
   const manualModelId = String((hfModelId && hfModelId.value) || "").trim();
   const requestedModelId = manualModelId || (model && model.id) || "";
+  const requestedModelType = currentSelectedModelType();
 
   const params = new URLSearchParams();
   if (requestedModelId) {
     params.set("model_id", requestedModelId);
+  }
+  if (requestedModelType) {
+    params.set("model_type", requestedModelType);
   }
 
   let voices = [];
@@ -299,15 +321,21 @@ async function refreshVoicesForSelection(options = {}) {
       : [];
     defaultVoice = String(voiceStatus.default_voice || "").trim();
 
+    const resolvedModelType = normalizedModelType(voiceStatus.model_type || requestedModelType || (model && model.model_type) || "other");
+
     upsertModelEntry({
       ...(model || {}),
       id: String(voiceStatus.model_id || requestedModelId || (model && model.id) || "").trim(),
       ...voiceStatus,
-      model_type: String(voiceStatus.model_type || (model && model.model_type) || "other"),
+      model_type: resolvedModelType,
       model_type_label: String(
-        voiceStatus.model_type_label || modelTypeLabel(voiceStatus.model_type || (model && model.model_type) || "other"),
+        voiceStatus.model_type_label || modelTypeLabel(resolvedModelType),
       ),
     });
+
+    if (modelTypeSelect) {
+      modelTypeSelect.value = resolvedModelType;
+    }
 
     if (requestedModelId && !state.selectedModelId) {
       state.selectedModelId = requestedModelId;
@@ -324,7 +352,9 @@ async function refreshVoicesForSelection(options = {}) {
   renderVoiceOptions(voices, options.preferDefaultVoice ? defaultVoice : "");
 
   if (voiceHint) {
-    if (!voices.length) {
+    if (!supportsGenerationForModelType(currentSelectedModelType())) {
+      voiceHint.textContent = modelReadinessMessage(currentSelectedModel());
+    } else if (!voices.length) {
       voiceHint.textContent = "This model does not define any voices yet.";
     } else {
       voiceHint.textContent = "Voices are loaded from the selected model.";
@@ -339,10 +369,15 @@ async function refreshVoicesForSelection(options = {}) {
 async function syncModelControlsFromSelection() {
   const model = currentSelectedModel();
   const modelSelect = byId("modelSelect");
+  const modelTypeSelect = byId("modelTypeSelect");
   const hfModelId = byId("hfModelId");
 
   if (modelSelect && model) {
     modelSelect.value = model.id;
+  }
+
+  if (modelTypeSelect && model) {
+    modelTypeSelect.value = normalizedModelType(model.model_type);
   }
 
   if (hfModelId && model) {
@@ -436,12 +471,14 @@ async function downloadModel() {
   }
 
   const modelSelect = byId("modelSelect");
+  const modelTypeSelect = byId("modelTypeSelect");
   const hfModelId = byId("hfModelId");
   const downloadButton = byId("downloadModelButton");
 
   const selectedModelId = String((modelSelect && modelSelect.value) || state.selectedModelId || state.defaultModelId || "");
   const manualModelId = String((hfModelId && hfModelId.value) || "").trim();
   const requestedModelId = manualModelId || selectedModelId;
+  const requestedModelType = normalizedModelType((modelTypeSelect && modelTypeSelect.value) || (currentSelectedModel() && currentSelectedModel().model_type) || "kokoro");
 
   if (!requestedModelId) {
     setModelStatusMessage("Select a model or enter a manual model ID before downloading.");
@@ -475,6 +512,7 @@ async function downloadModel() {
       },
       body: JSON.stringify({
         model_id: requestedModelId,
+        model_type: requestedModelType,
       }),
     });
 
@@ -990,7 +1028,7 @@ async function generateAudio() {
   }
 
   const selectedModelId = (selectedModel && selectedModel.id) || state.defaultModelId || LOCAL_DEFAULT_MODEL_ID;
-  const modelType = normalizedModelType((selectedModel && selectedModel.model_type) || "other");
+  const modelType = currentSelectedModelType();
   const hfModelId = selectedModelId === LOCAL_DEFAULT_MODEL_ID ? "" : selectedModelId;
   const voiceSelect = byId("voiceSelect");
   const voice = String((voiceSelect && voiceSelect.value) || (selectedModel && selectedModel.default_voice) || "").trim();
@@ -1041,6 +1079,7 @@ function bindEvents() {
   const fileInput = byId("epubFile");
   const generateButton = byId("generateButton");
   const modelSelect = byId("modelSelect");
+  const modelTypeSelect = byId("modelTypeSelect");
   const hfModelInput = byId("hfModelId");
   const downloadModelButton = byId("downloadModelButton");
 
@@ -1105,6 +1144,29 @@ function bindEvents() {
     modelSelect.addEventListener("change", async () => {
       state.selectedModelId = modelSelect.value;
       await syncModelControlsFromSelection();
+    });
+  }
+
+  if (modelTypeSelect) {
+    modelTypeSelect.addEventListener("change", async () => {
+      const selected = currentSelectedModel();
+      const nextType = normalizedModelType(modelTypeSelect.value);
+      modelTypeSelect.value = nextType;
+
+      if (selected) {
+        upsertModelEntry({
+          ...selected,
+          model_type: nextType,
+          model_type_label: modelTypeLabel(nextType),
+          supports_generation: supportsGenerationForModelType(nextType),
+        });
+      }
+
+      setModelStatusMessage(modelReadinessMessage(currentSelectedModel()));
+      updateJobActions({ can_stop: false, can_clear_files: false, active: false, status: "idle" });
+      await refreshVoicesForSelection({ preferDefaultVoice: true });
+      setModelStatusMessage(modelReadinessMessage(currentSelectedModel()));
+      updateJobActions({ can_stop: false, can_clear_files: false, active: false, status: "idle" });
     });
   }
 

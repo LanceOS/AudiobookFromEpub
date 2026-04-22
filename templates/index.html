@@ -52,12 +52,22 @@
             <div>
               <label class="field-label" for="modelSelect">Model</label>
               <select id="modelSelect" aria-describedby="modelHint"></select>
-              <div id="modelHint" class="field-hint">Model type is inferred from your selection. Download non-default models before generation.</div>
+              <div id="modelHint" class="field-hint">Choose a model from the catalog. Download non-default models before generation.</div>
+            </div>
+            <div>
+              <label class="field-label" for="modelTypeSelect">Model Type</label>
+              <select id="modelTypeSelect" aria-describedby="modelTypeHint">
+                <option value="kokoro" selected>Kokoro</option>
+                <option value="vox" hidden>Vox</option>
+                <option value="voxcpm2">VoxCPM2</option>
+                <option value="other">Other</option>
+              </select>
+              <div id="modelTypeHint" class="field-hint">Choose a type first, then pick a voice from that model.</div>
             </div>
             <div class="form-full">
               <label class="field-label" for="hfModelId">Manual Hugging Face Model ID (optional)</label>
               <input id="hfModelId" type="text" placeholder="organization/model" />
-              <div class="field-hint">Leave blank to download the selected model. Manual model type is inferred automatically and cached in <code>.app_data/hf_models</code>.</div>
+              <div class="field-hint">Leave blank to download the selected model. Manual entries are cached in <code>.app_data/hf_models</code>.</div>
             </div>
             <div class="form-full model-download-row">
               <button id="downloadModelButton" class="btn-secondary" type="button">Download Model</button>

@@ -94,22 +94,21 @@ When generation starts, a new folder is created inside your selected output dire
 
 Generated WAV files are placed in that run folder.
 
-## Docker Compose (Hostable)
+## Docker Compose (Self-Contained)
 
-The repository includes a hostable container setup:
+The repository includes a self-contained container setup:
 
 - `Dockerfile`
 - `docker-compose.yml`
 
-`docker-compose.yml` requires a host output directory via `AUDIOBOOK_OUTPUT_DIR`.
-If this variable is missing, compose fails fast.
+`docker-compose.yml` stores generated audio in a named volume mounted at `/app/generated_audio`.
+The app data and model cache live in a second named volume mounted at `/app/.app_data`.
 
 Example:
 
 ```bash
 cd /home/lance/Documents/Code/AudiobookFromEpub
-export AUDIOBOOK_OUTPUT_DIR=/absolute/path/on/host/audiobook_output
-export AUDIOBOOK_SECRET_KEY="replace-with-a-long-random-secret"
+export AUDIOBOOK_SECRET_KEY="replace-with-a-long-random-secret" # optional, but recommended
 docker compose up --build -d
 ```
 
@@ -119,9 +118,11 @@ Open:
 
 Container notes:
 
-- Generated audio is written to the required host bind mount (`AUDIOBOOK_OUTPUT_DIR`).
-- Runtime output-root enforcement is enabled with `AUDIOBOOK_ALLOWED_OUTPUT_ROOT=/app/output`.
+- Generated audio is written to the named volume `audiobook_generated_audio` at `/app/generated_audio`.
+- Runtime output-root enforcement is enabled with `AUDIOBOOK_ALLOWED_OUTPUT_ROOT=/app/generated_audio`.
 - The container runs as non-root with `read_only: true`, `tmpfs: /tmp`, and `no-new-privileges`.
+- If you want files on the host instead, replace the named output volume in `docker-compose.yml` with a bind mount to a host directory.
+- The default Docker image installs the lean Kokoro runtime set and leaves `qwen-tts` out to keep the build small enough for typical Podman/Docker storage limits. Install `qwen-tts` separately if you need Qwen3 CustomVoice inside the container.
 
 Validate compose configuration:
 

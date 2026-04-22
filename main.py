@@ -19,7 +19,7 @@ import shutil
 import subprocess
 import threading
 import time
-import sys
+import sys 
 import signal
 from datetime import datetime, timezone
 from pathlib import Path
@@ -35,6 +35,17 @@ _ROOT = _Path(__file__).resolve().parent
 _SRC = _ROOT / "src"
 if _SRC.exists():
     _sys.path.insert(0, str(_SRC))
+
+_APP_DATA = _ROOT / ".app_data"
+_CACHE_ROOT = _APP_DATA / ".cache"
+os.environ.setdefault("HOME", str(_APP_DATA))
+os.environ.setdefault("XDG_CACHE_HOME", str(_CACHE_ROOT))
+os.environ.setdefault("HF_HOME", str(_CACHE_ROOT / "huggingface"))
+os.environ.setdefault("HF_HUB_CACHE", str(_CACHE_ROOT / "huggingface" / "hub"))
+os.environ.setdefault("HUGGINGFACE_HUB_CACHE", str(_CACHE_ROOT / "huggingface" / "hub"))
+os.environ.setdefault("HF_TOKEN_PATH", str(_CACHE_ROOT / "huggingface" / "token"))
+os.environ.setdefault("TRANSFORMERS_CACHE", str(_CACHE_ROOT / "transformers"))
+os.environ.setdefault("TORCH_HOME", str(_CACHE_ROOT / "torch"))
 
 from core.config import (
     ACTIVE_JOB_STATUSES,

@@ -9,6 +9,7 @@ lxml>=5,<6
 tqdm>=4.66,<5
 sentencepiece>=0.2,<1
 scipy>=1.13,<2
+kokoro>=0.9.2; python_version < "3.13"
 # qwen-tts is optional and intentionally excluded from the default Docker image.
 # Install it separately if you want Qwen3 CustomVoice support inside the container.
 flask>=3.1,<4

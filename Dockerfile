@@ -17,11 +17,17 @@ RUN python -m pip install --upgrade pip \
 
 COPY . /app
 
+# Add entrypoint that prepares mounted volumes and drops privileges at runtime
+COPY docker-entrypoint.py /usr/local/bin/docker-entrypoint.py
+RUN chmod +x /usr/local/bin/docker-entrypoint.py
+
 RUN useradd --create-home --uid 10001 appuser \
     && mkdir -p /app/.app_data /app/generated_audio \
     && chown -R appuser:appuser /app
 
-USER appuser
+# We keep the image runtime as root so the entrypoint can chown mounted volumes,
+# then the entrypoint will drop privileges to `appuser` before exec'ing the app.
+ENTRYPOINT ["/usr/local/bin/docker-entrypoint.py"]
 
 EXPOSE 5000
 

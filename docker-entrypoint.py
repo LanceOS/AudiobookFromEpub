@@ -1,0 +1,78 @@
+#!/usr/bin/env python3
+import os
+import sys
+import pwd
+
+
+def chown_tree(path: str, uid: int, gid: int) -> None:
+    try:
+        for root, dirs, files in os.walk(path):
+            try:
+                os.chown(root, uid, gid)
+            except Exception:
+                pass
+            for d in dirs:
+                try:
+                    os.chown(os.path.join(root, d), uid, gid)
+                except Exception:
+                    pass
+            for f in files:
+                try:
+                    os.chown(os.path.join(root, f), uid, gid)
+                except Exception:
+                    pass
+        try:
+            os.chown(path, uid, gid)
+        except Exception:
+            pass
+    except Exception:
+        pass
+
+
+def main() -> None:
+    # Default app user UID/GID (created in Dockerfile)
+    default_uid = 10001
+    default_gid = 10001
+    paths = ["/app/generated_audio", "/app/.app_data"]
+
+    for p in paths:
+        try:
+            if os.path.exists(p):
+                chown_tree(p, default_uid, default_gid)
+            else:
+                os.makedirs(p, exist_ok=True)
+                try:
+                    os.chown(p, default_uid, default_gid)
+                except Exception:
+                    pass
+        except Exception:
+            try:
+                os.chmod(p, 0o777)
+            except Exception:
+                pass
+
+    # Drop privileges to `appuser` if available
+    try:
+        pw = pwd.getpwnam("appuser")
+        uid = pw.pw_uid
+        gid = pw.pw_gid
+        try:
+            os.setgid(gid)
+            os.setuid(uid)
+            os.environ["HOME"] = pw.pw_dir
+        except Exception:
+            # If we cannot drop privileges, continue as-is (best-effort)
+            pass
+    except KeyError:
+        # appuser not present; continue as root
+        pass
+
+    # Exec the requested command (CMD will be provided by Dockerfile/compose)
+    if len(sys.argv) > 1:
+        os.execvp(sys.argv[1], sys.argv[1:])
+    else:
+        os.execvp("python", ["python", "main.py", "--host", "0.0.0.0", "--port", "5000"])
+
+
+if __name__ == "__main__":
+    main()

@@ -8,6 +8,14 @@ services:
       - "5000:5000"
     environment:
       AUDIOBOOK_ALLOWED_OUTPUT_ROOT: /app/generated_audio
+      HOME: /app/.app_data
+      XDG_CACHE_HOME: /app/.app_data/.cache
+      HF_HOME: /app/.app_data/.cache/huggingface
+      HF_HUB_CACHE: /app/.app_data/.cache/huggingface/hub
+      HUGGINGFACE_HUB_CACHE: /app/.app_data/.cache/huggingface/hub
+      HF_TOKEN_PATH: /app/.app_data/.cache/huggingface/token
+      TRANSFORMERS_CACHE: /app/.app_data/.cache/transformers
+      TORCH_HOME: /app/.app_data/.cache/torch
       AUDIOBOOK_MAX_UPLOAD_MB: ${AUDIOBOOK_MAX_UPLOAD_MB:-50}
       AUDIOBOOK_COOKIE_SECURE: ${AUDIOBOOK_COOKIE_SECURE:-0}
       AUDIOBOOK_ENABLE_CLEANUP: ${AUDIOBOOK_ENABLE_CLEANUP:-1}

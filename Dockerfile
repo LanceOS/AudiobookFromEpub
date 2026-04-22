@@ -1,7 +1,15 @@
 FROM python:3.12-slim
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
-    PYTHONUNBUFFERED=1
+    PYTHONUNBUFFERED=1 \
+    HOME=/app/.app_data \
+    XDG_CACHE_HOME=/app/.app_data/.cache \
+    HF_HOME=/app/.app_data/.cache/huggingface \
+    HF_HUB_CACHE=/app/.app_data/.cache/huggingface/hub \
+    HUGGINGFACE_HUB_CACHE=/app/.app_data/.cache/huggingface/hub \
+    HF_TOKEN_PATH=/app/.app_data/.cache/huggingface/token \
+    TRANSFORMERS_CACHE=/app/.app_data/.cache/transformers \
+    TORCH_HOME=/app/.app_data/.cache/torch
 
 WORKDIR /app
 
@@ -15,19 +23,14 @@ RUN python -m pip install --upgrade pip \
     && pip install --no-cache-dir --index-url https://download.pytorch.org/whl/cpu torch torchaudio \
     && pip install --no-cache-dir -r /app/requirements-docker.txt
 
-COPY . /app
+# Kokoro/Misaki needs a small English spaCy model for phoneme/token handling.
+RUN python -m spacy download en_core_web_sm
 
-# Add entrypoint that prepares mounted volumes and drops privileges at runtime
-COPY docker-entrypoint.py /usr/local/bin/docker-entrypoint.py
-RUN chmod +x /usr/local/bin/docker-entrypoint.py
+COPY . /app
 
 RUN useradd --create-home --uid 10001 appuser \
     && mkdir -p /app/.app_data /app/generated_audio \
     && chown -R appuser:appuser /app
-
-# We keep the image runtime as root so the entrypoint can chown mounted volumes,
-# then the entrypoint will drop privileges to `appuser` before exec'ing the app.
-ENTRYPOINT ["/usr/local/bin/docker-entrypoint.py"]
 
 EXPOSE 5000
 
